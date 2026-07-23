@@ -17,6 +17,7 @@
 - The MVP uses anonymous `www.reddit.com/...json` access only.
 - Never rotate proxies, spoof a browser, or bypass `401`, `403`, `429`, challenge pages, or other access controls.
 - Stop the daily Reddit run on `401` or `403`; retry `429` at most once using `Retry-After`.
+- Send a descriptive owner-configured `REDDIT_USER_AGENT`; never ship an invented Reddit username.
 - After three consecutive access-control failures, disable anonymous collection until the administrator explicitly re-enables it.
 - Do not fetch or parse external article bodies in this phase.
 - AI output must distinguish the Reddit post’s claim, comment additions, and comment caveats; it is not fact-checking.
@@ -173,6 +174,7 @@ export interface Env {
   AI: Ai;
   ADMIN_KEY: string;
   APP_ORIGIN: string;
+  REDDIT_USER_AGENT: string;
 }
 
 export type PipelineMessage =
@@ -375,7 +377,7 @@ Assert that the client sends:
 expect(request.url).toBe(
   "https://www.reddit.com/r/todayilearned/top.json?t=day&limit=20&raw_json=1"
 );
-expect(request.headers.get("User-Agent")).toBe("web:everyday-news:v1.0 (private-mvp)");
+expect(request.headers.get("User-Agent")).toBe("web:everyday-news:v1.0 (by /u/test_owner)");
 ```
 
 Also assert mappings for `403`, `429` with `Retry-After`, `500`, `text/html`, and invalid JSON.
@@ -392,7 +394,7 @@ Expected: FAIL because the adapter modules do not exist.
 
 - [ ] **Step 4: Implement strict parsing and response classification**
 
-`AnonymousJsonRedditAdapter` accepts `fetcher` and `userAgent` in its constructor. It must:
+`AnonymousJsonRedditAdapter` accepts `fetcher` and `userAgent` in its constructor. Production passes `env.REDDIT_USER_AGENT`; tests pass the explicit test-only value shown above. It must:
 
 - request only `www.reddit.com`;
 - set `Accept: application/json`;
@@ -1034,6 +1036,7 @@ Document exact commands for:
 - D1 and Queue creation;
 - migration application;
 - `ADMIN_KEY` and `APP_ORIGIN` secret/config setup;
+- owner-configured `REDDIT_USER_AGENT` secret setup;
 - local fixture tests;
 - live single-request probe;
 - Worker deployment;
@@ -1093,6 +1096,7 @@ Run:
 ```bash
 npx wrangler d1 migrations apply everyday-news --remote --config apps/worker/wrangler.jsonc
 npx wrangler secret put ADMIN_KEY --config apps/worker/wrangler.jsonc
+npx wrangler secret put REDDIT_USER_AGENT --config apps/worker/wrangler.jsonc
 ```
 
 Set `APP_ORIGIN` to the final Pages origin before production validation.
