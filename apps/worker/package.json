@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
-    "typecheck": "wrangler types && tsc --noEmit --target ES2022 --lib ES2022,WebWorker --module ESNext --moduleResolution Bundler --strict --skipLibCheck worker-configuration.d.ts src/env.ts src/index.ts",
+    "typecheck": "wrangler types && tsc -p tsconfig.json",
     "build": "wrangler deploy --dry-run"
   },
   "dependencies": {
