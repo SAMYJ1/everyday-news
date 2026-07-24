@@ -222,6 +222,41 @@ describe("Repository", () => {
     expect(stored).toEqual({ prompt_version: "prompt-v7", input_hash: "sha256:abc123" });
   });
 
+  it("loads summary input and finds only successful matching summaries", async () => {
+    await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
+    await repository.upsertSourceItem(sourceItem());
+    await repository.replaceComments("item-1", [
+      {
+        id: "comment-1",
+        itemId: "item-1",
+        externalId: "t1_comment1",
+        parentExternalId: "t3_abc",
+        author: "commenter",
+        body: "A useful comment.",
+        score: 3,
+        depth: 0,
+        redditUrl: "https://reddit.com/comment-1",
+        publishedAt: now,
+        fetchedAt: now,
+        deletedAt: null,
+        deleted: false
+      }
+    ]);
+    await repository.saveCandidate(candidate());
+    await repository.saveSummary(summary());
+    await repository.saveSummary(summary({
+      id: "failed-summary",
+      status: "failed",
+      inputHash: "sha256:failed"
+    }));
+
+    expect(await repository.getCandidate("run-1", "item-1")).toEqual(candidate());
+    expect(await repository.getSourceItem("item-1")).toMatchObject(sourceItem());
+    expect(await repository.listComments("item-1")).toMatchObject([{ id: "comment-1", body: "A useful comment." }]);
+    expect(await repository.getSuccessfulSummary("candidate-1", "v1", "sha256:test")).toMatchObject(summary());
+    expect(await repository.getSuccessfulSummary("candidate-1", "v1", "sha256:failed")).toBeNull();
+  });
+
   it("disables anonymous collection after the persisted failure threshold", async () => {
     await repository.recordAnonymousFailure("2026-07-23T00:00:00.000Z");
     await repository.recordAnonymousFailure("2026-07-24T00:00:00.000Z");

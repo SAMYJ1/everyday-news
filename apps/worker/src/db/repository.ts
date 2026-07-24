@@ -111,6 +111,25 @@ function toCandidate(row: CandidateRow): Candidate {
   };
 }
 
+function toSummaryRecord(row: Omit<SummaryRow, "title_en" | "reddit_url" | "source_url">): KnowledgeCardRecord {
+  return {
+    id: row.id,
+    candidateId: row.candidate_id,
+    status: row.status,
+    titleZh: row.title_zh,
+    oneLineFact: row.one_line_fact,
+    whyInteresting: row.why_interesting,
+    commentInsights: JSON.parse(row.comment_insights) as string[],
+    caveats: JSON.parse(row.caveats) as string[],
+    confidenceNote: row.confidence_note,
+    model: row.model,
+    promptVersion: row.prompt_version,
+    inputHash: row.input_hash,
+    generatedAt: row.generated_at,
+    reviewedAt: row.reviewed_at
+  };
+}
+
 export class Repository {
   constructor(private readonly db: D1Database) {}
 
@@ -264,6 +283,50 @@ export class Repository {
     await this.db.batch(statements);
   }
 
+  async getSourceItem(itemId: string): Promise<SourceItem | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT id, source, external_id, title, author, reddit_url, source_url, score,
+          upvote_ratio, comment_count, published_at, fetched_at, last_checked_at, deleted_at
+        FROM source_items WHERE id = ?`
+      )
+      .bind(itemId)
+      .first<{
+        id: string; source: string; external_id: string; title: string | null; author: string | null;
+        reddit_url: string; source_url: string | null; score: number; upvote_ratio: number | null;
+        comment_count: number; published_at: string; fetched_at: string; last_checked_at: string;
+        deleted_at: string | null;
+      }>();
+    if (row === null) return null;
+    return {
+      id: row.id, source: row.source, externalId: row.external_id, title: row.title, author: row.author,
+      redditUrl: row.reddit_url, sourceUrl: row.source_url, score: row.score, upvoteRatio: row.upvote_ratio,
+      commentCount: row.comment_count, publishedAt: row.published_at, fetchedAt: row.fetched_at,
+      lastCheckedAt: row.last_checked_at, deletedAt: row.deleted_at
+    };
+  }
+
+  async listComments(itemId: string): Promise<SourceComment[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT id, item_id, external_id, parent_external_id, author, body, score, depth, reddit_url,
+          published_at, fetched_at, deleted_at
+        FROM source_comments WHERE item_id = ? ORDER BY score DESC, id ASC`
+      )
+      .bind(itemId)
+      .all<{
+        id: string; item_id: string; external_id: string; parent_external_id: string | null;
+        author: string | null; body: string; score: number; depth: number; reddit_url: string;
+        published_at: string | null; fetched_at: string; deleted_at: string | null;
+      }>();
+    return result.results.map((row) => ({
+      id: row.id, itemId: row.item_id, externalId: row.external_id,
+      parentExternalId: row.parent_external_id, author: row.author, body: row.body, score: row.score,
+      depth: row.depth, redditUrl: row.reddit_url, publishedAt: row.published_at,
+      fetchedAt: row.fetched_at, deletedAt: row.deleted_at, deleted: row.deleted_at !== null
+    }));
+  }
+
   async saveCandidate(candidate: Candidate): Promise<void> {
     await this.db
       .prepare(
@@ -304,6 +367,36 @@ export class Repository {
       .all<CandidateRow>();
 
     return result.results.map(toCandidate);
+  }
+
+  async getCandidate(runId: string, itemId: string): Promise<Candidate | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT id, run_id, item_id, score, reasons, rank, status, selected_at
+        FROM candidates WHERE run_id = ? AND item_id = ?`
+      )
+      .bind(runId, itemId)
+      .first<CandidateRow>();
+    return row === null ? null : toCandidate(row);
+  }
+
+  async getSuccessfulSummary(
+    candidateId: string,
+    promptVersion: string,
+    inputHash: string
+  ): Promise<KnowledgeCardRecord | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT id, candidate_id, status, title_zh, one_line_fact, why_interesting,
+          comment_insights, caveats, confidence_note, model, prompt_version, input_hash,
+          generated_at, reviewed_at
+        FROM summaries
+        WHERE candidate_id = ? AND prompt_version = ? AND input_hash = ?
+          AND status IN ('draft', 'approved', 'rejected')`
+      )
+      .bind(candidateId, promptVersion, inputHash)
+      .first<Omit<SummaryRow, "title_en" | "reddit_url" | "source_url">>();
+    return row === null ? null : toSummaryRecord(row);
   }
 
   async saveSummary(summary: KnowledgeCardRecord): Promise<void> {

@@ -18,6 +18,11 @@ export interface PipelineDeps {
     | "getDiscoveryCheckpoint"
     | "completeDiscovery"
     | "replaceComments"
+    | "getCandidate"
+    | "getSourceItem"
+    | "listComments"
+    | "getSuccessfulSummary"
+    | "saveSummary"
   >;
   now?: () => Date;
 }
