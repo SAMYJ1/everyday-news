@@ -17,7 +17,7 @@ function formatScore(value: number): string {
   return String(Math.round(value * 100) / 100);
 }
 
-function normalizeSourceUrl(sourceUrl: string): string {
+export function normalizeSourceUrl(sourceUrl: string): string {
   try {
     const url = new URL(sourceUrl.trim());
     url.protocol = url.protocol.toLowerCase();

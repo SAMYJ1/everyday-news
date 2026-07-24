@@ -67,7 +67,11 @@ describe("collectComments", () => {
 
     expect(getPostWithComments).toHaveBeenCalledWith("t3_post1", { limit: 20, depth: 2 });
     expect(result).toEqual({ stored: 3 });
-    expect(replaceComments).toHaveBeenCalledWith("t3_post1", [valid[1], valid[2], valid[0]]);
+    expect(replaceComments).toHaveBeenCalledWith("t3_post1", [
+      expect.objectContaining({ id: "t1_comment7", score: 95 }),
+      valid[2],
+      valid[0],
+    ]);
   });
 
   it("stores no more than twenty useful unique comments", async () => {

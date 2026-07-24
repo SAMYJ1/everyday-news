@@ -22,15 +22,20 @@ export async function collectComments(
   itemId: string,
 ): Promise<{ stored: number }> {
   const { comments } = await deps.reddit.getPostWithComments(itemId, { limit: COMMENT_LIMIT, depth: 2 });
-  const seenBodies = new Set<string>();
-  const usefulComments = comments
-    .filter((comment) => {
-      if (!isUseful(comment)) return false;
-      const body = normalizedBody(comment.body);
-      if (seenBodies.has(body)) return false;
-      seenBodies.add(body);
-      return true;
-    })
+  const commentsByBody = new Map<string, SourceComment>();
+  for (const comment of comments) {
+    if (!isUseful(comment)) continue;
+    const body = normalizedBody(comment.body);
+    const existing = commentsByBody.get(body);
+    if (
+      existing === undefined ||
+      comment.score > existing.score ||
+      (comment.score === existing.score && comment.id.localeCompare(existing.id) < 0)
+    ) {
+      commentsByBody.set(body, comment);
+    }
+  }
+  const usefulComments = [...commentsByBody.values()]
     .sort((first, second) => second.score - first.score || first.id.localeCompare(second.id))
     .slice(0, COMMENT_LIMIT);
 

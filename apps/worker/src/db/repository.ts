@@ -50,6 +50,17 @@ interface AnonymousCollectionRow {
   consecutive_failures: number;
 }
 
+interface CandidateRow {
+  id: string;
+  run_id: string;
+  item_id: string;
+  score: number;
+  reasons: string;
+  rank: number;
+  status: Candidate["status"];
+  selected_at: string;
+}
+
 function toFetchRun(row: FetchRunRow): FetchRun {
   return {
     id: row.id,
@@ -84,6 +95,19 @@ function toSummary(row: SummaryRow): KnowledgeCard {
     titleEn: row.title_en,
     redditUrl: row.reddit_url,
     sourceUrl: row.source_url
+  };
+}
+
+function toCandidate(row: CandidateRow): Candidate {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    itemId: row.item_id,
+    score: row.score,
+    reasons: JSON.parse(row.reasons) as string[],
+    rank: row.rank,
+    status: row.status,
+    selectedAt: row.selected_at
   };
 }
 
@@ -224,6 +248,20 @@ export class Repository {
         candidate.selectedAt
       )
       .run();
+  }
+
+  async listCandidatesForRun(runId: string): Promise<Candidate[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT id, run_id, item_id, score, reasons, rank, status, selected_at
+        FROM candidates
+        WHERE run_id = ?
+        ORDER BY rank ASC`
+      )
+      .bind(runId)
+      .all<CandidateRow>();
+
+    return result.results.map(toCandidate);
   }
 
   async saveSummary(summary: KnowledgeCardRecord): Promise<void> {

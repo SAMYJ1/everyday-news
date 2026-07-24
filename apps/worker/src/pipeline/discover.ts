@@ -1,6 +1,6 @@
 import type { Repository } from "../db/repository";
 import type { Candidate } from "../domain";
-import { evaluatePost } from "../ranking/score";
+import { evaluatePost, normalizeSourceUrl } from "../ranking/score";
 import type { RedditSourceAdapter } from "../reddit/adapter";
 
 const DISCOVERY_LIMIT = 20;
@@ -10,7 +10,12 @@ export interface PipelineDeps {
   reddit: RedditSourceAdapter;
   repository: Pick<
     Repository,
-    "getRecentSourceUrls" | "getRecentTitles" | "upsertSourceItem" | "saveCandidate" | "replaceComments"
+    | "getRecentSourceUrls"
+    | "getRecentTitles"
+    | "upsertSourceItem"
+    | "saveCandidate"
+    | "listCandidatesForRun"
+    | "replaceComments"
   >;
   now?: () => Date;
 }
@@ -20,21 +25,45 @@ export async function discoverCandidates(
   runId: string,
 ): Promise<{ discovered: number; selected: number; itemIds: string[] }> {
   const items = await deps.reddit.listTopPosts({ limit: DISCOVERY_LIMIT, time: "day" });
-  await Promise.all(items.map((item) => deps.repository.upsertSourceItem(item)));
+  const uniqueItems = [
+    ...new Map(items.map((item) => [item.externalId, item])).values(),
+  ];
+  for (const item of uniqueItems) {
+    await deps.repository.upsertSourceItem(item);
+  }
+
+  const existing = await deps.repository.listCandidatesForRun(runId);
+  if (existing.length >= CANDIDATE_LIMIT) {
+    return {
+      discovered: uniqueItems.length,
+      selected: existing.length,
+      itemIds: existing.map((candidate) => candidate.itemId),
+    };
+  }
 
   const [recentUrls, recentTitles] = await Promise.all([
     deps.repository.getRecentSourceUrls(30),
     deps.repository.getRecentTitles(30),
   ]);
   const now = deps.now?.() ?? new Date();
-  const candidates = items
+  const existingItemIds = new Set(existing.map((candidate) => candidate.itemId));
+  const ranked = uniqueItems
+    .filter((item) => !existingItemIds.has(item.id))
     .map((item) => ({ item, evaluation: evaluatePost(item, { now, recentUrls, recentTitles }) }))
     .filter(({ evaluation }) => evaluation.eligible)
     .sort(
       (first, second) =>
         second.evaluation.score - first.evaluation.score || first.item.id.localeCompare(second.item.id),
-    )
-    .slice(0, CANDIDATE_LIMIT);
+    );
+  const seenUrls = new Set<string>();
+  const candidates = ranked.filter(({ item }) => {
+    const sourceUrl = item.sourceUrl;
+    if (sourceUrl === null) return false;
+    const normalized = normalizeSourceUrl(sourceUrl);
+    if (seenUrls.has(normalized)) return false;
+    seenUrls.add(normalized);
+    return true;
+  }).slice(0, CANDIDATE_LIMIT - existing.length);
 
   const selectedAt = now.toISOString();
   for (const [index, { item, evaluation }] of candidates.entries()) {
@@ -44,7 +73,7 @@ export async function discoverCandidates(
       itemId: item.id,
       score: evaluation.score,
       reasons: evaluation.reasons,
-      rank: index + 1,
+      rank: existing.length + index + 1,
       status: "selected",
       selectedAt,
     };
@@ -52,8 +81,11 @@ export async function discoverCandidates(
   }
 
   return {
-    discovered: items.length,
-    selected: candidates.length,
-    itemIds: candidates.map(({ item }) => item.id),
+    discovered: uniqueItems.length,
+    selected: existing.length + candidates.length,
+    itemIds: [
+      ...existing.map((candidate) => candidate.itemId),
+      ...candidates.map(({ item }) => item.id),
+    ],
   };
 }

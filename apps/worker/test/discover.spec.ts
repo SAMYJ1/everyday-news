@@ -1,6 +1,9 @@
+import { env } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import type { Candidate, SourceItem } from "../src/domain";
+import { Repository } from "../src/db/repository";
 import { discoverCandidates, type PipelineDeps } from "../src/pipeline/discover";
+import { applyMigrations } from "./apply-migrations";
 
 const now = new Date("2026-07-24T00:00:00.000Z");
 
@@ -46,7 +49,8 @@ function deps(posts: SourceItem[], recentUrls = new Set<string>()): {
         getRecentSourceUrls: vi.fn(async () => recentUrls),
         getRecentTitles: vi.fn(async () => []),
         upsertSourceItem,
-        saveCandidate
+        saveCandidate,
+        listCandidatesForRun: vi.fn(async () => [])
       },
       now: () => now
     } as unknown as PipelineDeps,
@@ -123,4 +127,109 @@ describe("discoverCandidates", () => {
 
     expect(result.itemIds).toEqual(["t3_post1", "t3_post2"]);
   });
+
+  it("deduplicates the current listing by external ID and normalized source URL", async () => {
+    const posts = [
+      sourceItem(1),
+      sourceItem(99, {
+        id: "duplicate-id",
+        externalId: "t3_post1",
+        sourceUrl: "https://example.test/source/1",
+      }),
+      sourceItem(2, { sourceUrl: "HTTPS://EXAMPLE.TEST/source/1/#fragment", score: 500 }),
+      sourceItem(3),
+    ];
+    const { deps: pipelineDeps, upsertSourceItem, saveCandidate } = deps(posts);
+
+    const result = await discoverCandidates(pipelineDeps, "run-4");
+
+    expect(result).toEqual({
+      discovered: 3,
+      selected: 2,
+      itemIds: ["t3_post2", "t3_post3"],
+    });
+    expect(upsertSourceItem).toHaveBeenCalledTimes(3);
+    expect(saveCandidate).toHaveBeenCalledTimes(2);
+  });
+
+  it("reuses a saved prefix when a discovery message is retried", async () => {
+    const posts = Array.from({ length: 6 }, (_, index) => sourceItem(index + 1));
+    const { deps: pipelineDeps, saveCandidate } = deps(posts);
+    const saved: Candidate[] = [];
+    saveCandidate.mockImplementation(async (value: Candidate) => {
+      saved.push(value);
+    });
+    pipelineDeps.repository.listCandidatesForRun = vi.fn(async () => [...saved]);
+
+    const first = await discoverCandidates(pipelineDeps, "run-retry");
+    const second = await discoverCandidates(pipelineDeps, "run-retry");
+
+    expect(first.itemIds).toEqual(second.itemIds);
+    expect(saved).toHaveLength(5);
+    expect(saved.map((candidate) => candidate.rank)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("continues after a partially persisted candidate prefix", async () => {
+    const posts = Array.from({ length: 6 }, (_, index) => sourceItem(index + 1));
+    const { deps: pipelineDeps, saveCandidate } = deps(posts);
+    const prefix = candidateFor("run-partial", "t3_post6", 1);
+    pipelineDeps.repository.listCandidatesForRun = vi.fn(async () => [prefix]);
+
+    const result = await discoverCandidates(pipelineDeps, "run-partial");
+
+    expect(result).toEqual({
+      discovered: 6,
+      selected: 5,
+      itemIds: ["t3_post6", "t3_post5", "t3_post4", "t3_post3", "t3_post2"],
+    });
+    expect(
+      saveCandidate.mock.calls.map(([value]) => (value as Candidate).rank),
+    ).toEqual([2, 3, 4, 5]);
+  });
+
+  it("is idempotent against D1 when the same discovery run is delivered twice", async () => {
+    await applyMigrations();
+    await env.DB.batch(
+      ["summaries", "candidates", "source_comments", "source_items", "fetch_runs"].map(
+        (table) => env.DB.prepare(`DELETE FROM ${table}`),
+      ),
+    );
+    const repository = new Repository(env.DB);
+    await repository.createRun({
+      id: "run-d1-retry",
+      localDate: "2026-07-24",
+      startedAt: now.toISOString(),
+    });
+    const posts = Array.from({ length: 6 }, (_, index) => sourceItem(index + 1));
+    const pipelineDeps: PipelineDeps = {
+      reddit: {
+        listTopPosts: vi.fn(async () => posts),
+        getPostWithComments: vi.fn(),
+        checkItems: vi.fn(),
+      },
+      repository,
+      now: () => now,
+    };
+
+    const first = await discoverCandidates(pipelineDeps, "run-d1-retry");
+    const second = await discoverCandidates(pipelineDeps, "run-d1-retry");
+    const persisted = await repository.listCandidatesForRun("run-d1-retry");
+
+    expect(second).toEqual(first);
+    expect(persisted).toHaveLength(5);
+    expect(persisted.map((candidate) => candidate.rank)).toEqual([1, 2, 3, 4, 5]);
+  });
 });
+
+function candidateFor(runId: string, itemId: string, rank: number): Candidate {
+  return {
+    id: `${runId}:${itemId}`,
+    runId,
+    itemId,
+    score: 90,
+    reasons: ["existing"],
+    rank,
+    status: "selected",
+    selectedAt: now.toISOString(),
+  };
+}
