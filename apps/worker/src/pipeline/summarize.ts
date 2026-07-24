@@ -1,5 +1,9 @@
 import type { KnowledgeCardRecord } from "../domain";
-import { CARD_MODEL, type CardGenerator } from "../ai/workers-ai";
+import {
+  CARD_MODEL,
+  InvalidCardResponse,
+  type CardGenerator,
+} from "../ai/workers-ai";
 import type { PipelineDeps } from "./discover";
 
 export const PROMPT_VERSION = "v1";
@@ -25,7 +29,12 @@ export async function summarizeCandidate(
 
   const inputHash = await sha256(JSON.stringify({ item, comments, promptVersion: PROMPT_VERSION }));
   const existing = await deps.repository.getSuccessfulSummary(candidate.id, PROMPT_VERSION, inputHash);
-  if (existing !== null) return;
+  if (existing !== null) {
+    await deps.repository.setCandidateStatus(candidate.id, "summarized");
+    return;
+  }
+  const claimed = await deps.repository.claimCandidateForSummary(candidate.id);
+  if (!claimed) return;
 
   const base: Pick<KnowledgeCardRecord, "id" | "candidateId" | "model" | "promptVersion" | "inputHash" | "generatedAt"> = {
     id: `summary-${candidate.id}-${inputHash}`,
@@ -36,19 +45,38 @@ export async function summarizeCandidate(
     generatedAt: (deps.now?.() ?? new Date()).toISOString()
   };
 
+  let card;
   try {
-    const card = await deps.generator.generate({ item, comments });
+    card = await deps.generator.generate({ item, comments });
+  } catch (error) {
+    if (!(error instanceof InvalidCardResponse)) {
+      await deps.repository.setCandidateStatus(candidate.id, candidate.status);
+      throw error;
+    }
+    try {
+      await deps.repository.saveSummary({
+        ...base,
+        status: "failed",
+        titleZh: "",
+        oneLineFact: "",
+        whyInteresting: "",
+        commentInsights: [],
+        caveats: [],
+        confidenceNote: "",
+      });
+      await deps.repository.setCandidateStatus(candidate.id, "failed");
+      return;
+    } catch (persistenceError) {
+      await deps.repository.setCandidateStatus(candidate.id, candidate.status);
+      throw persistenceError;
+    }
+  }
+
+  try {
     await deps.repository.saveSummary({ ...base, ...card, status: "draft" });
-  } catch {
-    await deps.repository.saveSummary({
-      ...base,
-      status: "failed",
-      titleZh: "",
-      oneLineFact: "",
-      whyInteresting: "",
-      commentInsights: [],
-      caveats: [],
-      confidenceNote: ""
-    });
+    await deps.repository.setCandidateStatus(candidate.id, "summarized");
+  } catch (error) {
+    await deps.repository.setCandidateStatus(candidate.id, candidate.status);
+    throw error;
   }
 }

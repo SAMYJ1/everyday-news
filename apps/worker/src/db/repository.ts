@@ -380,6 +380,28 @@ export class Repository {
     return row === null ? null : toCandidate(row);
   }
 
+  async claimCandidateForSummary(candidateId: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE candidates
+        SET status = 'summarizing'
+        WHERE id = ? AND status IN ('selected', 'comments_ready', 'failed')`
+      )
+      .bind(candidateId)
+      .run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async setCandidateStatus(
+    candidateId: string,
+    status: Candidate["status"],
+  ): Promise<void> {
+    await this.db
+      .prepare("UPDATE candidates SET status = ? WHERE id = ?")
+      .bind(status, candidateId)
+      .run();
+  }
+
   async getSuccessfulSummary(
     candidateId: string,
     promptVersion: string,
@@ -420,7 +442,11 @@ export class Repository {
           prompt_version = excluded.prompt_version,
           input_hash = excluded.input_hash,
           generated_at = excluded.generated_at,
-          reviewed_at = excluded.reviewed_at`
+          reviewed_at = excluded.reviewed_at
+        WHERE NOT (
+          summaries.status IN ('draft', 'approved', 'rejected')
+          AND excluded.status = 'failed'
+        )`
       )
       .bind(
         summary.id,

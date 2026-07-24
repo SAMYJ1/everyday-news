@@ -23,6 +23,8 @@ export interface PipelineDeps {
     | "listComments"
     | "getSuccessfulSummary"
     | "saveSummary"
+    | "claimCandidateForSummary"
+    | "setCandidateStatus"
   >;
   now?: () => Date;
 }

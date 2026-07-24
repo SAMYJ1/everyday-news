@@ -257,6 +257,39 @@ describe("Repository", () => {
     expect(await repository.getSuccessfulSummary("candidate-1", "v1", "sha256:failed")).toBeNull();
   });
 
+  it("atomically grants only one summary claim and never downgrades a successful card", async () => {
+    await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
+    await repository.upsertSourceItem(sourceItem());
+    await repository.saveCandidate(candidate());
+
+    const claims = await Promise.all([
+      repository.claimCandidateForSummary("candidate-1"),
+      repository.claimCandidateForSummary("candidate-1"),
+    ]);
+    expect(claims.sort()).toEqual([false, true]);
+
+    await repository.saveSummary(summary());
+    await repository.saveSummary(
+      summary({
+        status: "failed",
+        titleZh: "",
+        oneLineFact: "",
+        whyInteresting: "",
+        commentInsights: [],
+        caveats: [],
+        confidenceNote: "",
+      }),
+    );
+
+    expect(
+      await repository.getSuccessfulSummary("candidate-1", "v1", "sha256:test"),
+    ).toMatchObject({
+      status: "draft",
+      titleZh: "有趣的事实",
+      oneLineFact: "一条简短的事实。",
+    });
+  });
+
   it("disables anonymous collection after the persisted failure threshold", async () => {
     await repository.recordAnonymousFailure("2026-07-23T00:00:00.000Z");
     await repository.recordAnonymousFailure("2026-07-24T00:00:00.000Z");

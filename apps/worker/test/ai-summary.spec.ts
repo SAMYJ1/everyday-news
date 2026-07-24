@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SourceComment, SourceItem } from "../src/domain";
 import { KnowledgeCardSchema } from "../src/ai/card-schema";
-import { WorkersAiCardGenerator } from "../src/ai/workers-ai";
+import {
+  InvalidCardResponse,
+  WorkersAiTemporaryFailure,
+  WorkersAiCardGenerator,
+} from "../src/ai/workers-ai";
 
 const item: SourceItem = {
   id: "t3_post1",
@@ -65,8 +69,8 @@ describe("WorkersAiCardGenerator", () => {
   it("frames unverified source material and repairs one malformed response", async () => {
     const run = vi
       .fn()
-      .mockResolvedValueOnce({ response: JSON.stringify({ ...validCard, titleZh: "English title only" }) })
-      .mockResolvedValueOnce({ response: JSON.stringify(validCard) });
+      .mockResolvedValueOnce({ response: { ...validCard, titleZh: "English title only" } })
+      .mockResolvedValueOnce({ response: validCard });
     const generator = new WorkersAiCardGenerator({ run } as unknown as Ai);
 
     await expect(generator.generate({ item, comments })).resolves.toEqual(validCard);
@@ -78,6 +82,12 @@ describe("WorkersAiCardGenerator", () => {
       temperature: 0.2,
       response_format: { type: "json_schema" }
     });
+    const responseFormat = firstInput.response_format as {
+      json_schema: Record<string, unknown>;
+    };
+    expect(responseFormat.json_schema.type).toBe("object");
+    expect(responseFormat.json_schema).not.toHaveProperty("schema");
+    expect(responseFormat.json_schema).not.toHaveProperty("strict");
     const prompt = String(firstInput.prompt);
     expect(prompt).toContain("原帖声称");
     expect(prompt).toContain("评论摘录 1");
@@ -89,10 +99,24 @@ describe("WorkersAiCardGenerator", () => {
   });
 
   it("fails after the repair response is malformed too", async () => {
-    const run = vi.fn().mockResolvedValue({ response: JSON.stringify({ titleZh: "only one field" }) });
+    const run = vi.fn().mockResolvedValue({ response: { titleZh: "only one field" } });
     const generator = new WorkersAiCardGenerator({ run } as unknown as Ai);
 
-    await expect(generator.generate({ item, comments })).rejects.toThrow();
+    await expect(generator.generate({ item, comments })).rejects.toBeInstanceOf(
+      InvalidCardResponse,
+    );
     expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry Workers AI transport or service failures as repair prompts", async () => {
+    const failure = new Error("Workers AI quota exceeded");
+    const run = vi.fn().mockRejectedValue(failure);
+    const generator = new WorkersAiCardGenerator({ run } as unknown as Ai);
+
+    await expect(generator.generate({ item, comments })).rejects.toMatchObject({
+      constructor: WorkersAiTemporaryFailure,
+      cause: failure,
+    });
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });

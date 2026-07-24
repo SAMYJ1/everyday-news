@@ -35,37 +35,74 @@ function promptFor({ item, comments }: CardInput, repair = false): string {
   ].join("\n\n");
 }
 
-function responseText(output: Record<string, unknown>): string {
-  if (typeof output.response !== "string") throw new Error("Workers AI did not return a JSON response");
-  return output.response;
+export class InvalidCardResponse extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "InvalidCardResponse";
+  }
+}
+
+export class WorkersAiTemporaryFailure extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "WorkersAiTemporaryFailure";
+  }
+}
+
+function responseValue(output: Record<string, unknown>): unknown {
+  if (typeof output.response === "string") {
+    try {
+      return JSON.parse(output.response);
+    } catch (error) {
+      throw new InvalidCardResponse("Workers AI returned invalid JSON", {
+        cause: error,
+      });
+    }
+  }
+  if (typeof output.response === "object" && output.response !== null) {
+    return output.response;
+  }
+  throw new InvalidCardResponse("Workers AI did not return a JSON response");
 }
 
 export class WorkersAiCardGenerator implements CardGenerator {
   constructor(private readonly ai: Ai) {}
 
   async generate(input: CardInput): Promise<KnowledgeCard> {
-    let firstError: unknown;
+    let lastInvalidResponse: InvalidCardResponse | undefined;
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      let output;
       try {
-        const output = await this.ai.run(CARD_MODEL, {
+        output = await this.ai.run(CARD_MODEL, {
           prompt: promptFor(input, attempt === 1),
           temperature: 0.2,
           response_format: {
             type: "json_schema",
-            json_schema: {
-              name: "knowledge_card",
-              strict: true,
-              schema: z.toJSONSchema(KnowledgeCardSchema)
-            }
-          }
+            json_schema: z.toJSONSchema(KnowledgeCardSchema),
+          },
         });
-        return KnowledgeCardSchema.parse(JSON.parse(responseText(output)));
       } catch (error) {
-        firstError ??= error;
+        throw new WorkersAiTemporaryFailure("Workers AI request failed", {
+          cause: error,
+        });
+      }
+      try {
+        return KnowledgeCardSchema.parse(responseValue(output));
+      } catch (error) {
+        lastInvalidResponse =
+          error instanceof InvalidCardResponse
+            ? error
+            : new InvalidCardResponse(
+                "Workers AI response did not match the knowledge-card schema",
+                { cause: error },
+              );
       }
     }
 
-    throw firstError instanceof Error ? firstError : new Error("Workers AI returned an invalid knowledge card");
+    throw (
+      lastInvalidResponse ??
+      new InvalidCardResponse("Workers AI returned an invalid knowledge card")
+    );
   }
 }
