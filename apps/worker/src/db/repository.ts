@@ -285,6 +285,35 @@ export class Repository {
     ]);
   }
 
+  async getRecentSourceUrls(days: number): Promise<Set<string>> {
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const result = await this.db
+      .prepare(
+        `SELECT source_url
+        FROM source_items
+        WHERE source_url IS NOT NULL AND published_at >= ?`
+      )
+      .bind(cutoff)
+      .all<{ source_url: string }>();
+
+    return new Set(result.results.map((row) => row.source_url));
+  }
+
+  async getRecentTitles(days: number): Promise<string[]> {
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const result = await this.db
+      .prepare(
+        `SELECT title
+        FROM source_items
+        WHERE title IS NOT NULL AND published_at >= ?
+        ORDER BY published_at DESC, id ASC`
+      )
+      .bind(cutoff)
+      .all<{ title: string }>();
+
+    return result.results.map((row) => row.title);
+  }
+
   async getLatestRun(): Promise<FetchRun | null> {
     const row = await this.db
       .prepare(

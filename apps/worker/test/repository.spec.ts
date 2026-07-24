@@ -94,6 +94,42 @@ describe("Repository", () => {
     expect(result.results).toEqual([{ id: "item-1", score: 42 }]);
   });
 
+  it("returns source URLs and titles published within the requested number of days", async () => {
+    const recentAt = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
+    const expiredAt = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+
+    await repository.upsertSourceItem(
+      sourceItem({
+        id: "recent-item",
+        externalId: "t3_recent",
+        title: "A recent interesting thing",
+        sourceUrl: "https://example.test/recent",
+        publishedAt: recentAt
+      })
+    );
+    await repository.upsertSourceItem(
+      sourceItem({
+        id: "expired-item",
+        externalId: "t3_expired",
+        title: "An expired interesting thing",
+        sourceUrl: "https://example.test/expired",
+        publishedAt: expiredAt
+      })
+    );
+    await repository.upsertSourceItem(
+      sourceItem({
+        id: "no-metadata-item",
+        externalId: "t3_no_metadata",
+        title: null,
+        sourceUrl: null,
+        publishedAt: recentAt
+      })
+    );
+
+    expect(await repository.getRecentSourceUrls(30)).toEqual(new Set(["https://example.test/recent"]));
+    expect(await repository.getRecentTitles(30)).toEqual(["A recent interesting thing"]);
+  });
+
   it("prevents two runs for the same local date", async () => {
     await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
 
