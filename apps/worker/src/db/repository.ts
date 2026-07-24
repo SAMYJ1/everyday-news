@@ -2,6 +2,7 @@ import type {
   AnonymousCollection,
   Candidate,
   FetchRun,
+  KnowledgeCard,
   KnowledgeCardRecord,
   SourceComment,
   SourceItem,
@@ -39,6 +40,9 @@ interface SummaryRow {
   input_hash: string;
   generated_at: string;
   reviewed_at: string | null;
+  title_en: string | null;
+  reddit_url: string;
+  source_url: string | null;
 }
 
 interface AnonymousCollectionRow {
@@ -61,7 +65,7 @@ function toFetchRun(row: FetchRunRow): FetchRun {
   };
 }
 
-function toSummary(row: SummaryRow): KnowledgeCardRecord {
+function toSummary(row: SummaryRow): KnowledgeCard {
   return {
     id: row.id,
     candidateId: row.candidate_id,
@@ -76,7 +80,10 @@ function toSummary(row: SummaryRow): KnowledgeCardRecord {
     promptVersion: row.prompt_version,
     inputHash: row.input_hash,
     generatedAt: row.generated_at,
-    reviewedAt: row.reviewed_at
+    reviewedAt: row.reviewed_at,
+    titleEn: row.title_en,
+    redditUrl: row.reddit_url,
+    sourceUrl: row.source_url
   };
 }
 
@@ -292,25 +299,33 @@ export class Repository {
     return row === null ? null : toFetchRun(row);
   }
 
-  async listCards(status?: SummaryStatus): Promise<KnowledgeCardRecord[]> {
+  async listCards(status?: SummaryStatus): Promise<KnowledgeCard[]> {
     const statement =
       status === undefined
         ? this.db.prepare(
-            `SELECT id, candidate_id, status, title_zh, one_line_fact, why_interesting,
+            `SELECT summaries.id, summaries.candidate_id, summaries.status, summaries.title_zh,
+              summaries.one_line_fact, summaries.why_interesting,
               comment_insights, caveats, confidence_note, model, prompt_version,
-              input_hash, generated_at, reviewed_at
+              input_hash, generated_at, reviewed_at, source_items.title AS title_en,
+              source_items.reddit_url, source_items.source_url
             FROM summaries
-            WHERE status != 'source_deleted'
-            ORDER BY generated_at DESC`
+            JOIN candidates ON candidates.id = summaries.candidate_id
+            JOIN source_items ON source_items.id = candidates.item_id
+            WHERE summaries.status != 'source_deleted'
+            ORDER BY summaries.generated_at DESC`
           )
         : this.db
             .prepare(
-              `SELECT id, candidate_id, status, title_zh, one_line_fact, why_interesting,
+              `SELECT summaries.id, summaries.candidate_id, summaries.status, summaries.title_zh,
+                summaries.one_line_fact, summaries.why_interesting,
                 comment_insights, caveats, confidence_note, model, prompt_version,
-                input_hash, generated_at, reviewed_at
+                input_hash, generated_at, reviewed_at, source_items.title AS title_en,
+                source_items.reddit_url, source_items.source_url
               FROM summaries
-              WHERE status = ?
-              ORDER BY generated_at DESC`
+              JOIN candidates ON candidates.id = summaries.candidate_id
+              JOIN source_items ON source_items.id = candidates.item_id
+              WHERE summaries.status = ?
+              ORDER BY summaries.generated_at DESC`
             )
             .bind(status);
     const result = await statement.all<SummaryRow>();

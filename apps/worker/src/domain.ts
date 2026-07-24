@@ -86,6 +86,12 @@ export interface KnowledgeCardRecord {
   reviewedAt?: string | null;
 }
 
+export interface KnowledgeCard extends KnowledgeCardRecord {
+  titleEn: string | null;
+  redditUrl: string;
+  sourceUrl: string | null;
+}
+
 export interface AnonymousCollection {
   enabled: boolean;
   consecutiveFailures: number;

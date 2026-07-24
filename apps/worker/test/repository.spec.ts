@@ -117,6 +117,21 @@ describe("Repository", () => {
     expect(await repository.listCards("rejected")).toHaveLength(1);
   });
 
+  it("lists cards with their original title and source links", async () => {
+    await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
+    await repository.upsertSourceItem(sourceItem());
+    await repository.saveCandidate(candidate());
+    await repository.saveSummary(summary());
+
+    const [card] = await repository.listCards("draft");
+
+    expect(card).toMatchObject({
+      titleEn: "An interesting thing",
+      redditUrl: "https://reddit.com/r/todayilearned/comments/abc",
+      sourceUrl: "https://example.test/source"
+    });
+  });
+
   it("stores prompt version and input hash", async () => {
     await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
     await repository.upsertSourceItem(sourceItem());
