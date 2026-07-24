@@ -289,9 +289,11 @@ export class Repository {
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const result = await this.db
       .prepare(
-        `SELECT source_url
-        FROM source_items
-        WHERE source_url IS NOT NULL AND published_at >= ?`
+        `SELECT DISTINCT source_items.source_url
+        FROM candidates
+        JOIN source_items ON source_items.id = candidates.item_id
+        WHERE source_items.source_url IS NOT NULL
+          AND candidates.selected_at >= ?`
       )
       .bind(cutoff)
       .all<{ source_url: string }>();
@@ -303,10 +305,12 @@ export class Repository {
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const result = await this.db
       .prepare(
-        `SELECT title
-        FROM source_items
-        WHERE title IS NOT NULL AND published_at >= ?
-        ORDER BY published_at DESC, id ASC`
+        `SELECT DISTINCT source_items.title, candidates.selected_at, source_items.id
+        FROM candidates
+        JOIN source_items ON source_items.id = candidates.item_id
+        WHERE source_items.title IS NOT NULL
+          AND candidates.selected_at >= ?
+        ORDER BY candidates.selected_at DESC, source_items.id ASC`
       )
       .bind(cutoff)
       .all<{ title: string }>();

@@ -65,6 +65,9 @@ export function evaluatePost(item: SourceItem, context: RankingContext): Evaluat
   if (item.deleted) {
     return exclude("deleted");
   }
+  if (item.title === null || item.title.trim() === "") {
+    return exclude("no_title");
+  }
   if (item.sourceUrl === null || item.sourceUrl.trim() === "") {
     return exclude("no_external_source");
   }

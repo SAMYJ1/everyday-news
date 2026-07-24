@@ -38,6 +38,7 @@ describe("evaluatePost", () => {
     ["sticky", { stickied: true }, false, {}],
     ["nsfw", { over18: true }, false, {}],
     ["deleted", { deleted: true }, false, {}],
+    ["missing title", { title: null }, false, {}],
     ["no external source", { sourceUrl: null }, false, {}],
     [
       "duplicate URL in 30 days",
@@ -80,5 +81,19 @@ describe("evaluatePost", () => {
     );
 
     expect(result).toMatchObject({ eligible: false, score: 0, exclusion: "similar_title" });
+  });
+
+  it("includes the 0.85 title-similarity boundary and permits a value below it", () => {
+    const common = Array.from({ length: 17 }, (_, index) => `word${index + 1}`);
+    const item = sourceItem({ title: [...common, "itemonly"].join(" ") });
+
+    expect(
+      evaluatePost(item, context({ recentTitles: [[...common, "other1", "other2"].join(" ")] }))
+    ).toMatchObject({ eligible: false, exclusion: "similar_title" });
+    expect(
+      evaluatePost(item, context({
+        recentTitles: [[...common.slice(0, 16), "other1", "other2", "other3"].join(" ")]
+      })).eligible
+    ).toBe(true);
   });
 });

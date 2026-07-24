@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Candidate, KnowledgeCardRecord, SourceItem } from "../src/domain";
 import { Repository } from "../src/db/repository";
 import { applyMigrations } from "./apply-migrations";
@@ -94,17 +94,29 @@ describe("Repository", () => {
     expect(result.results).toEqual([{ id: "item-1", score: 42 }]);
   });
 
-  it("returns source URLs and titles published within the requested number of days", async () => {
-    const recentAt = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
-    const expiredAt = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+  it("returns metadata selected within the inclusive rolling window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(now));
+    const recentAt = "2026-07-22T12:00:00.000Z";
+    const boundaryAt = "2026-06-23T00:00:00.000Z";
+    const expiredAt = "2026-06-22T23:59:59.000Z";
 
+    await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
     await repository.upsertSourceItem(
       sourceItem({
         id: "recent-item",
         externalId: "t3_recent",
         title: "A recent interesting thing",
         sourceUrl: "https://example.test/recent",
-        publishedAt: recentAt
+        publishedAt: "2020-01-01T00:00:00.000Z"
+      })
+    );
+    await repository.upsertSourceItem(
+      sourceItem({
+        id: "boundary-item",
+        externalId: "t3_boundary",
+        title: "A boundary interesting thing",
+        sourceUrl: "https://example.test/boundary"
       })
     );
     await repository.upsertSourceItem(
@@ -112,22 +124,50 @@ describe("Repository", () => {
         id: "expired-item",
         externalId: "t3_expired",
         title: "An expired interesting thing",
-        sourceUrl: "https://example.test/expired",
-        publishedAt: expiredAt
+        sourceUrl: "https://example.test/expired"
       })
     );
     await repository.upsertSourceItem(
       sourceItem({
-        id: "no-metadata-item",
-        externalId: "t3_no_metadata",
-        title: null,
-        sourceUrl: null,
-        publishedAt: recentAt
+        id: "unselected-item",
+        externalId: "t3_unselected",
+        title: "A discovered but unselected thing",
+        sourceUrl: "https://example.test/unselected"
+      })
+    );
+    await repository.saveCandidate(
+      candidate({
+        id: "candidate-recent",
+        itemId: "recent-item",
+        rank: 1,
+        selectedAt: recentAt
+      })
+    );
+    await repository.saveCandidate(
+      candidate({
+        id: "candidate-boundary",
+        itemId: "boundary-item",
+        rank: 2,
+        selectedAt: boundaryAt
+      })
+    );
+    await repository.saveCandidate(
+      candidate({
+        id: "candidate-expired",
+        itemId: "expired-item",
+        rank: 3,
+        selectedAt: expiredAt
       })
     );
 
-    expect(await repository.getRecentSourceUrls(30)).toEqual(new Set(["https://example.test/recent"]));
-    expect(await repository.getRecentTitles(30)).toEqual(["A recent interesting thing"]);
+    expect(await repository.getRecentSourceUrls(30)).toEqual(
+      new Set(["https://example.test/recent", "https://example.test/boundary"])
+    );
+    expect(await repository.getRecentTitles(30)).toEqual([
+      "A recent interesting thing",
+      "A boundary interesting thing"
+    ]);
+    vi.useRealTimers();
   });
 
   it("prevents two runs for the same local date", async () => {
