@@ -1,0 +1,87 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "name": "t3_valid",
+            "id": "valid",
+            "title": "TIL honey never spoils",
+            "author": "curious_reader",
+            "permalink": "/r/todayilearned/comments/valid/til_honey_never_spoils/",
+            "url_overridden_by_dest": "https://example.org/honey",
+            "score": 420,
+            "upvote_ratio": 0.96,
+            "num_comments": 37,
+            "created_utc": 1721000000,
+            "stickied": false,
+            "over_18": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "name": "t1_c1",
+            "parent_id": "t3_valid",
+            "author": "first",
+            "body": "Honey's low water activity helps prevent microbial growth.",
+            "score": 120,
+            "depth": 0,
+            "permalink": "/r/todayilearned/comments/valid/til_honey_never_spoils/c1/",
+            "created_utc": 1721001000,
+            "replies": {
+              "kind": "Listing",
+              "data": {
+                "children": [
+                  {
+                    "kind": "t1",
+                    "data": {
+                      "name": "t1_c2",
+                      "parent_id": "t1_c1",
+                      "author": null,
+                      "body": "[deleted]",
+                      "score": 5,
+                      "depth": 1,
+                      "permalink": "/r/todayilearned/comments/valid/til_honey_never_spoils/c2/",
+                      "created_utc": 1721001100,
+                      "replies": ""
+                    }
+                  },
+                  {
+                    "kind": "more",
+                    "data": {
+                      "children": ["c4"]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "name": "t1_c3",
+            "parent_id": "t3_valid",
+            "author": "third",
+            "body": "Sealed ancient honey has sometimes remained edible.",
+            "score": 42,
+            "depth": 0,
+            "permalink": "/r/todayilearned/comments/valid/til_honey_never_spoils/c3/",
+            "created_utc": 1721001200,
+            "replies": ""
+          }
+        }
+      ]
+    }
+  }
+]

@@ -1,0 +1,22 @@
+{
+  "kind": "Listing",
+  "data": {
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "name": "t3_deleted",
+          "id": "deleted",
+          "title": "[deleted]",
+          "author": null,
+          "permalink": "/r/todayilearned/comments/deleted/deleted/",
+          "url": "https://www.reddit.com/r/todayilearned/comments/deleted/deleted/",
+          "score": 0,
+          "num_comments": 0,
+          "created_utc": 1721000300,
+          "removed_by_category": "deleted"
+        }
+      }
+    ]
+  }
+}
