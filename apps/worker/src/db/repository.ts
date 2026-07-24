@@ -152,6 +152,48 @@ export class Repository {
     return run;
   }
 
+  async getDiscoveryCheckpoint(runId: string): Promise<{
+    discovered: number;
+    selected: number;
+    itemIds: string[];
+  } | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT discovered_count, selected_count, discovery_completed_at
+        FROM fetch_runs
+        WHERE id = ?`
+      )
+      .bind(runId)
+      .first<{
+        discovered_count: number;
+        selected_count: number;
+        discovery_completed_at: string | null;
+      }>();
+    if (row === null || row.discovery_completed_at === null) return null;
+
+    const candidates = await this.listCandidatesForRun(runId);
+    return {
+      discovered: row.discovered_count,
+      selected: row.selected_count,
+      itemIds: candidates.map((candidate) => candidate.itemId)
+    };
+  }
+
+  async completeDiscovery(
+    runId: string,
+    result: { discovered: number; selected: number },
+    completedAt: string
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE fetch_runs
+        SET discovered_count = ?, selected_count = ?, discovery_completed_at = ?
+        WHERE id = ?`
+      )
+      .bind(result.discovered, result.selected, completedAt, runId)
+      .run();
+  }
+
   async upsertSourceItem(item: SourceItem): Promise<void> {
     await this.db
       .prepare(

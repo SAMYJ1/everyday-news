@@ -50,7 +50,9 @@ function deps(posts: SourceItem[], recentUrls = new Set<string>()): {
         getRecentTitles: vi.fn(async () => []),
         upsertSourceItem,
         saveCandidate,
-        listCandidatesForRun: vi.fn(async () => [])
+        listCandidatesForRun: vi.fn(async () => []),
+        getDiscoveryCheckpoint: vi.fn(async () => null),
+        completeDiscovery: vi.fn(async () => undefined)
       },
       now: () => now
     } as unknown as PipelineDeps,
@@ -219,6 +221,45 @@ describe("discoverCandidates", () => {
     expect(persisted).toHaveLength(5);
     expect(persisted.map((candidate) => candidate.rank)).toEqual([1, 2, 3, 4, 5]);
   });
+
+  it.each([0, 3])(
+    "returns a completed %i-candidate D1 checkpoint without refetching Reddit",
+    async (eligibleCount) => {
+      await applyMigrations();
+      await env.DB.batch(
+        ["summaries", "candidates", "source_comments", "source_items", "fetch_runs"].map(
+          (table) => env.DB.prepare(`DELETE FROM ${table}`),
+        ),
+      );
+      const repository = new Repository(env.DB);
+      const runId = `run-underfilled-${eligibleCount}`;
+      await repository.createRun({
+        id: runId,
+        localDate: `2026-07-${20 + eligibleCount}`,
+        startedAt: now.toISOString(),
+      });
+      const posts = Array.from({ length: eligibleCount }, (_, index) =>
+        sourceItem(index + 1),
+      );
+      const listTopPosts = vi.fn(async () => posts);
+      const pipelineDeps: PipelineDeps = {
+        reddit: {
+          listTopPosts,
+          getPostWithComments: vi.fn(),
+          checkItems: vi.fn(),
+        },
+        repository,
+        now: () => now,
+      };
+
+      const first = await discoverCandidates(pipelineDeps, runId);
+      const second = await discoverCandidates(pipelineDeps, runId);
+
+      expect(second).toEqual(first);
+      expect(second.selected).toBe(eligibleCount);
+      expect(listTopPosts).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 function candidateFor(runId: string, itemId: string, rank: number): Candidate {

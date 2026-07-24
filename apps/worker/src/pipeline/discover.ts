@@ -15,6 +15,8 @@ export interface PipelineDeps {
     | "upsertSourceItem"
     | "saveCandidate"
     | "listCandidatesForRun"
+    | "getDiscoveryCheckpoint"
+    | "completeDiscovery"
     | "replaceComments"
   >;
   now?: () => Date;
@@ -24,6 +26,9 @@ export async function discoverCandidates(
   deps: PipelineDeps,
   runId: string,
 ): Promise<{ discovered: number; selected: number; itemIds: string[] }> {
+  const checkpoint = await deps.repository.getDiscoveryCheckpoint(runId);
+  if (checkpoint !== null) return checkpoint;
+
   const items = await deps.reddit.listTopPosts({ limit: DISCOVERY_LIMIT, time: "day" });
   const uniqueItems = [
     ...new Map(items.map((item) => [item.externalId, item])).values(),
@@ -34,11 +39,17 @@ export async function discoverCandidates(
 
   const existing = await deps.repository.listCandidatesForRun(runId);
   if (existing.length >= CANDIDATE_LIMIT) {
-    return {
+    const result = {
       discovered: uniqueItems.length,
       selected: existing.length,
       itemIds: existing.map((candidate) => candidate.itemId),
     };
+    await deps.repository.completeDiscovery(
+      runId,
+      result,
+      (deps.now?.() ?? new Date()).toISOString(),
+    );
+    return result;
   }
 
   const [recentUrls, recentTitles] = await Promise.all([
@@ -80,7 +91,7 @@ export async function discoverCandidates(
     await deps.repository.saveCandidate(candidate);
   }
 
-  return {
+  const result = {
     discovered: uniqueItems.length,
     selected: existing.length + candidates.length,
     itemIds: [
@@ -88,4 +99,6 @@ export async function discoverCandidates(
       ...candidates.map(({ item }) => item.id),
     ],
   };
+  await deps.repository.completeDiscovery(runId, result, selectedAt);
+  return result;
 }

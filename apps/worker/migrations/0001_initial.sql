@@ -8,7 +8,8 @@ CREATE TABLE fetch_runs (
   error_code TEXT,
   error_message TEXT,
   started_at TEXT NOT NULL,
-  finished_at TEXT
+  finished_at TEXT,
+  discovery_completed_at TEXT
 );
 
 CREATE TABLE source_items (
