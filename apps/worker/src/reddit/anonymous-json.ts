@@ -93,6 +93,7 @@ export class AnonymousJsonRedditAdapter implements RedditSourceAdapter {
     const url = this.url(
       `/r/todayilearned/comments/${encodeURIComponent(bareId)}.json`,
       {
+        sort: "top",
         limit: this.boundedInteger(options.limit, 1, 100, "limit"),
         depth: this.boundedInteger(options.depth, 0, 10, "depth"),
         raw_json: 1,

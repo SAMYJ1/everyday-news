@@ -20,6 +20,7 @@ describe("Reddit JSON parser", () => {
       deleted: false,
     });
     expect(posts[2]?.upvoteRatio).toBeNull();
+    expect(posts[2]?.author).toBeNull();
     expect(posts[3]).toMatchObject({
       author: null,
       deleted: true,

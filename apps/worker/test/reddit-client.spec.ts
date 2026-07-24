@@ -44,7 +44,7 @@ describe("AnonymousJsonRedditAdapter", () => {
     expect(result.comments).toHaveLength(3);
     const request = fetcher.mock.calls[0]?.[0] as Request;
     expect(request.url).toBe(
-      "https://www.reddit.com/r/todayilearned/comments/valid.json?limit=20&depth=2&raw_json=1",
+      "https://www.reddit.com/r/todayilearned/comments/valid.json?sort=top&limit=20&depth=2&raw_json=1",
     );
   });
 
