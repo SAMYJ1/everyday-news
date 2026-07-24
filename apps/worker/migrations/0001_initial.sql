@@ -57,6 +57,7 @@ CREATE TABLE candidates (
     status IN ('selected','comments_ready','summarizing','summarized','failed')
   ),
   selected_at TEXT NOT NULL,
+  summary_claimed_at TEXT,
   UNIQUE(run_id, item_id),
   UNIQUE(run_id, rank)
 );

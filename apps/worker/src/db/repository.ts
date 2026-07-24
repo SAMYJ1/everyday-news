@@ -340,7 +340,8 @@ export class Repository {
           reasons = excluded.reasons,
           rank = excluded.rank,
           status = excluded.status,
-          selected_at = excluded.selected_at`
+          selected_at = excluded.selected_at,
+          summary_claimed_at = NULL`
       )
       .bind(
         candidate.id,
@@ -380,14 +381,24 @@ export class Repository {
     return row === null ? null : toCandidate(row);
   }
 
-  async claimCandidateForSummary(candidateId: string): Promise<boolean> {
+  async claimCandidateForSummary(
+    candidateId: string,
+    claimedAt: string,
+    staleBefore: string,
+  ): Promise<boolean> {
     const result = await this.db
       .prepare(
         `UPDATE candidates
-        SET status = 'summarizing'
-        WHERE id = ? AND status IN ('selected', 'comments_ready', 'failed')`
+        SET status = 'summarizing', summary_claimed_at = ?
+        WHERE id = ? AND (
+          status IN ('selected', 'comments_ready', 'failed', 'summarized')
+          OR (
+            status = 'summarizing'
+            AND (summary_claimed_at IS NULL OR summary_claimed_at <= ?)
+          )
+        )`
       )
-      .bind(candidateId)
+      .bind(claimedAt, candidateId, staleBefore)
       .run();
     return (result.meta.changes ?? 0) === 1;
   }
@@ -397,7 +408,9 @@ export class Repository {
     status: Candidate["status"],
   ): Promise<void> {
     await this.db
-      .prepare("UPDATE candidates SET status = ? WHERE id = ?")
+      .prepare(
+        "UPDATE candidates SET status = ?, summary_claimed_at = NULL WHERE id = ?",
+      )
       .bind(status, candidateId)
       .run();
   }

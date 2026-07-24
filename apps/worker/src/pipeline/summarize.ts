@@ -7,6 +7,14 @@ import {
 import type { PipelineDeps } from "./discover";
 
 export const PROMPT_VERSION = "v1";
+export const SUMMARY_CLAIM_LEASE_MS = 10 * 60 * 1_000;
+
+export class SummaryClaimUnavailable extends Error {
+  constructor() {
+    super("Candidate summarization is already in progress");
+    this.name = "SummaryClaimUnavailable";
+  }
+}
 
 export async function sha256(input: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
@@ -33,8 +41,16 @@ export async function summarizeCandidate(
     await deps.repository.setCandidateStatus(candidate.id, "summarized");
     return;
   }
-  const claimed = await deps.repository.claimCandidateForSummary(candidate.id);
-  if (!claimed) return;
+  const claimedAt = deps.now?.() ?? new Date();
+  const staleBefore = new Date(
+    claimedAt.getTime() - SUMMARY_CLAIM_LEASE_MS,
+  );
+  const claimed = await deps.repository.claimCandidateForSummary(
+    candidate.id,
+    claimedAt.toISOString(),
+    staleBefore.toISOString(),
+  );
+  if (!claimed) throw new SummaryClaimUnavailable();
 
   const base: Pick<KnowledgeCardRecord, "id" | "candidateId" | "model" | "promptVersion" | "inputHash" | "generatedAt"> = {
     id: `summary-${candidate.id}-${inputHash}`,
@@ -42,7 +58,7 @@ export async function summarizeCandidate(
     model: CARD_MODEL,
     promptVersion: PROMPT_VERSION,
     inputHash,
-    generatedAt: (deps.now?.() ?? new Date()).toISOString()
+    generatedAt: claimedAt.toISOString()
   };
 
   let card;

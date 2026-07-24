@@ -263,10 +263,34 @@ describe("Repository", () => {
     await repository.saveCandidate(candidate());
 
     const claims = await Promise.all([
-      repository.claimCandidateForSummary("candidate-1"),
-      repository.claimCandidateForSummary("candidate-1"),
+      repository.claimCandidateForSummary(
+        "candidate-1",
+        "2026-07-23T00:00:00.000Z",
+        "2026-07-22T23:50:00.000Z",
+      ),
+      repository.claimCandidateForSummary(
+        "candidate-1",
+        "2026-07-23T00:00:00.000Z",
+        "2026-07-22T23:50:00.000Z",
+      ),
     ]);
     expect(claims.sort()).toEqual([false, true]);
+
+    expect(
+      await repository.claimCandidateForSummary(
+        "candidate-1",
+        "2026-07-23T00:20:00.000Z",
+        "2026-07-23T00:10:00.000Z",
+      ),
+    ).toBe(true);
+    await repository.setCandidateStatus("candidate-1", "summarized");
+    expect(
+      await repository.claimCandidateForSummary(
+        "candidate-1",
+        "2026-07-23T00:21:00.000Z",
+        "2026-07-23T00:11:00.000Z",
+      ),
+    ).toBe(true);
 
     await repository.saveSummary(summary());
     await repository.saveSummary(

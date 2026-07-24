@@ -4,7 +4,10 @@ import {
   type CardGenerator,
 } from "../src/ai/workers-ai";
 import type { Candidate, KnowledgeCardRecord, SourceComment, SourceItem } from "../src/domain";
-import { summarizeCandidate } from "../src/pipeline/summarize";
+import {
+  summarizeCandidate,
+  SummaryClaimUnavailable,
+} from "../src/pipeline/summarize";
 import type { PipelineDeps } from "../src/pipeline/discover";
 
 const timestamp = "2026-07-24T00:00:00.000Z";
@@ -123,11 +126,30 @@ describe("summarizeCandidate", () => {
     >;
     claim.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
-    await Promise.all([
+    const results = await Promise.allSettled([
       summarizeCandidate(pipelineDeps, candidate.runId, item.id),
       summarizeCandidate(pipelineDeps, candidate.runId, item.id),
     ]);
 
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(
+      results.find((result) => result.status === "rejected"),
+    ).toMatchObject({ reason: expect.any(SummaryClaimUnavailable) });
+  });
+
+  it("can claim a summarized candidate when changed input has no matching hash", async () => {
+    const changedCandidate = { ...candidate, status: "summarized" as const };
+    const { deps: pipelineDeps, generate } = deps();
+    pipelineDeps.repository.getCandidate = vi.fn(async () => changedCandidate);
+
+    await summarizeCandidate(pipelineDeps, candidate.runId, item.id);
+
+    expect(pipelineDeps.repository.claimCandidateForSummary).toHaveBeenCalledWith(
+      candidate.id,
+      timestamp,
+      "2026-07-23T23:50:00.000Z",
+    );
     expect(generate).toHaveBeenCalledTimes(1);
   });
 
