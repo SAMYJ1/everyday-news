@@ -3,12 +3,24 @@ import { Repository } from "./db/repository";
 import type { Env, PipelineMessage } from "./env";
 import { collectComments } from "./pipeline/comments";
 import { discoverCandidates, type PipelineDeps } from "./pipeline/discover";
-import { SummaryClaimUnavailable, summarizeCandidate } from "./pipeline/summarize";
+import {
+  SUMMARY_CLAIM_LEASE_MS,
+  SummaryClaimUnavailable,
+  summarizeCandidate,
+} from "./pipeline/summarize";
 import { AnonymousJsonRedditAdapter, RedditAccessDenied, RedditRateLimited, RedditTemporaryFailure } from "./reddit/anonymous-json";
 import type { RedditSourceAdapter } from "./reddit/adapter";
 import type { CardGenerator } from "./ai/workers-ai";
 
 const SHANGHAI_TIME_ZONE = "Asia/Shanghai";
+const SUMMARY_CLAIM_RETRY_DELAY_SECONDS = Math.ceil(SUMMARY_CLAIM_LEASE_MS / 1_000);
+
+export class PipelineTemporaryFailure extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "PipelineTemporaryFailure";
+  }
+}
 
 export interface WorkerOptions {
   now?: () => Date;
@@ -30,7 +42,8 @@ function shanghaiLocalDate(now: Date): string {
 function isTemporaryFailure(error: unknown): boolean {
   return error instanceof RedditRateLimited ||
     error instanceof RedditTemporaryFailure ||
-    error instanceof WorkersAiTemporaryFailure;
+    error instanceof WorkersAiTemporaryFailure ||
+    error instanceof PipelineTemporaryFailure;
 }
 
 function errorMessage(error: unknown): string {
@@ -63,6 +76,33 @@ function completedSummaryStage(status: string): boolean {
   return status === "summarized" || status === "failed";
 }
 
+async function sendPipeline(
+  pipeline: Queue<PipelineMessage>,
+  body: PipelineMessage,
+): Promise<void> {
+  try {
+    await pipeline.send(body);
+  } catch (error) {
+    throw new PipelineTemporaryFailure("Pipeline queue delivery failed", {
+      cause: error,
+    });
+  }
+}
+
+async function refreshRunStatus(
+  repository: Repository,
+  runId: string,
+  finishedAt: string,
+): Promise<void> {
+  try {
+    await repository.refreshRunStatus(runId, finishedAt);
+  } catch (error) {
+    throw new PipelineTemporaryFailure("Run status refresh failed", {
+      cause: error,
+    });
+  }
+}
+
 export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, PipelineMessage> {
   const clock = options.now ?? (() => new Date());
 
@@ -90,15 +130,13 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         case "discover": {
           await repository.markRunRunning(message.body.runId);
           const result = await discoverCandidates(deps, message.body.runId);
-          try {
-            for (const itemId of result.itemIds) {
-              await env.PIPELINE.send({ stage: "comments", runId: message.body.runId, itemId });
-            }
-          } catch {
-            message.retry();
-            return;
+          for (const itemId of result.itemIds) {
+            await sendPipeline(
+              env.PIPELINE,
+              { stage: "comments", runId: message.body.runId, itemId },
+            );
           }
-          await repository.refreshRunStatus(message.body.runId, current.toISOString());
+          await refreshRunStatus(repository, message.body.runId, current.toISOString());
           message.ack();
           return;
         }
@@ -109,30 +147,20 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             return;
           }
           if (candidate.status === "comments_ready") {
-            try {
-              await env.PIPELINE.send({ ...message.body, stage: "summarize" });
-            } catch {
-              message.retry();
-              return;
-            }
+            await sendPipeline(env.PIPELINE, { ...message.body, stage: "summarize" });
             message.ack();
             return;
           }
           if (completedCommentsStage(candidate.status)) {
             if (completedSummaryStage(candidate.status)) {
-              await repository.refreshRunStatus(message.body.runId, current.toISOString());
+              await refreshRunStatus(repository, message.body.runId, current.toISOString());
             }
             message.ack();
             return;
           }
           await collectComments(deps, message.body.runId, message.body.itemId);
           await repository.setCandidateStatus(candidate.id, "comments_ready");
-          try {
-            await env.PIPELINE.send({ ...message.body, stage: "summarize" });
-          } catch {
-            message.retry();
-            return;
-          }
+          await sendPipeline(env.PIPELINE, { ...message.body, stage: "summarize" });
           message.ack();
           return;
         }
@@ -143,7 +171,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             return;
           }
           if (completedSummaryStage(candidate.status)) {
-            await repository.refreshRunStatus(message.body.runId, current.toISOString());
+            await refreshRunStatus(repository, message.body.runId, current.toISOString());
             message.ack();
             return;
           }
@@ -152,14 +180,14 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             message.body.runId,
             message.body.itemId,
           );
-          await repository.refreshRunStatus(message.body.runId, current.toISOString());
+          await refreshRunStatus(repository, message.body.runId, current.toISOString());
           message.ack();
           return;
         }
       }
     } catch (error) {
       if (error instanceof SummaryClaimUnavailable) {
-        message.retry();
+        message.retry({ delaySeconds: SUMMARY_CLAIM_RETRY_DELAY_SECONDS });
         return;
       }
       if (isTemporaryFailure(error)) {
@@ -167,26 +195,34 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         return;
       }
       if (error instanceof RedditAccessDenied) {
-        await repository.markRunFailed(
-          message.body.runId,
-          "reddit_access_denied",
-          error.message,
-          current.toISOString(),
-        );
+        try {
+          await repository.markRunFailed(
+            message.body.runId,
+            "reddit_access_denied",
+            error.message,
+            current.toISOString(),
+          );
+        } catch {
+          // Access denial is terminal even when its failure record cannot be persisted.
+        }
         message.ack();
         return;
       }
 
-      if (message.body.stage !== "discover") {
-        const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
-        if (candidate !== null) await repository.setCandidateStatus(candidate.id, "failed");
+      try {
+        if (message.body.stage !== "discover") {
+          const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
+          if (candidate !== null) await repository.setCandidateStatus(candidate.id, "failed");
+        }
+        await repository.markRunPartial(
+          message.body.runId,
+          `pipeline_${message.body.stage}_failed`,
+          errorMessage(error),
+          current.toISOString(),
+        );
+      } catch {
+        // Unknown recovery-write failures are terminal for this delivery.
       }
-      await repository.markRunPartial(
-        message.body.runId,
-        `pipeline_${message.body.stage}_failed`,
-        errorMessage(error),
-        current.toISOString(),
-      );
       message.ack();
     }
   }
@@ -215,7 +251,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         try {
           await processMessage(message, env, repository);
         } catch {
-          message.retry();
+          message.ack();
         }
       }
     },

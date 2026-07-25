@@ -13,6 +13,7 @@ import {
 import { applyMigrations } from "./apply-migrations";
 
 const now = new Date("2026-07-24T00:30:00.000Z");
+const summaryLeaseSeconds = 10 * 60;
 
 function item(id = "t3_post1"): SourceItem {
   return {
@@ -61,6 +62,17 @@ function candidate(runId: string, itemId: string, status: Candidate["status"] = 
     rank: 1,
     status,
     selectedAt: now.toISOString(),
+  };
+}
+
+function knowledgeCard() {
+  return {
+    titleZh: "中文标题",
+    oneLineFact: "原帖声称一件值得了解的事。",
+    whyInteresting: "这件事提供了一个有趣的视角。",
+    commentInsights: ["评论补充了背景。"],
+    caveats: ["尚未进行外部事实核查。"],
+    confidenceNote: "内容仅基于原帖和评论。",
   };
 }
 
@@ -221,27 +233,39 @@ describe("pipeline orchestration", () => {
     expect(pipeline.send).toHaveBeenCalledTimes(2);
   });
 
-  it("retries a summarize message while another summary claim is still fresh", async () => {
+  it("delays a fresh summary-claim retry until the lease can expire, then reclaims and completes", async () => {
     const pipeline = queue();
     const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
     await repository.upsertSourceItem(item());
     await repository.saveCandidate(candidate(run.id, "t3_post1", "comments_ready"));
     await repository.replaceComments("t3_post1", [comment("t3_post1")]);
+    await repository.completeDiscovery(run.id, { discovered: 1, selected: 1 }, now.toISOString());
     await repository.claimCandidateForSummary(
       `${run.id}:t3_post1`,
       "fresh-owner",
       now.toISOString(),
-      new Date(now.getTime() - 10 * 60 * 1_000).toISOString(),
+      new Date(now.getTime() - summaryLeaseSeconds * 1_000).toISOString(),
     );
-    const generator = { generate: vi.fn() };
-    const worker = createWorker({ reddit: reddit(), generator, now: () => now });
-    const queued = message({ stage: "summarize", runId: run.id, itemId: "t3_post1" });
+    let current = now;
+    const generator = { generate: vi.fn(async () => knowledgeCard()) };
+    const worker = createWorker({ reddit: reddit(), generator, now: () => current });
+    const first = message({ stage: "summarize", runId: run.id, itemId: "t3_post1" });
 
-    await worker.queue?.({ messages: [queued] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
+    await worker.queue?.({ messages: [first] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
 
-    expect(queued.retry).toHaveBeenCalledOnce();
-    expect(queued.ack).not.toHaveBeenCalled();
+    expect(first.retry).toHaveBeenCalledWith({ delaySeconds: summaryLeaseSeconds });
+    expect(first.ack).not.toHaveBeenCalled();
     expect(generator.generate).not.toHaveBeenCalled();
+
+    current = new Date(now.getTime() + summaryLeaseSeconds * 1_000);
+    const later = message({ stage: "summarize", runId: run.id, itemId: "t3_post1" });
+    await worker.queue?.({ messages: [later] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
+
+    expect(later.ack).toHaveBeenCalledOnce();
+    expect(later.retry).not.toHaveBeenCalled();
+    expect(generator.generate).toHaveBeenCalledOnce();
+    expect(await repository.getCandidate(run.id, "t3_post1")).toMatchObject({ status: "summarized" });
+    expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({ status: "completed" });
   });
 
   it.each([
@@ -278,6 +302,29 @@ describe("pipeline orchestration", () => {
       status: "partial",
       errorCode: "earlier_failure",
     });
+  });
+
+  it("retries a terminal refresh failure without mutating the summarized candidate, then completes", async () => {
+    const pipeline = queue();
+    const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
+    await repository.upsertSourceItem(item());
+    await repository.saveCandidate(candidate(run.id, "t3_post1", "summarized"));
+    await repository.completeDiscovery(run.id, { discovered: 1, selected: 1 }, now.toISOString());
+    vi.spyOn(Repository.prototype, "refreshRunStatus").mockRejectedValueOnce(new Error("D1 unavailable"));
+    const worker = createWorker({ reddit: reddit(), now: () => now });
+    const first = message({ stage: "summarize", runId: run.id, itemId: "t3_post1" });
+    const later = message({ stage: "summarize", runId: run.id, itemId: "t3_post1" });
+
+    await worker.queue?.({ messages: [first] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
+
+    expect(first.retry).toHaveBeenCalledOnce();
+    expect(first.ack).not.toHaveBeenCalled();
+    expect(await repository.getCandidate(run.id, "t3_post1")).toMatchObject({ status: "summarized" });
+
+    await worker.queue?.({ messages: [later] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
+
+    expect(later.ack).toHaveBeenCalledOnce();
+    expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({ status: "completed" });
   });
 
   it("acknowledges completed stage messages without repeating stage writes", async () => {
@@ -353,7 +400,23 @@ describe("pipeline orchestration", () => {
     expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({ status: "failed", errorCode: "reddit_access_denied" });
   });
 
-  it("continues to later messages when error-recovery persistence also fails", async () => {
+  it("acknowledges access denial even when persisting the failed run throws", async () => {
+    const pipeline = queue();
+    const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
+    vi.spyOn(Repository.prototype, "markRunFailed").mockRejectedValueOnce(new Error("D1 unavailable"));
+    const worker = createWorker({
+      reddit: reddit({ listTopPosts: async () => { throw new RedditAccessDenied(403); } }),
+      now: () => now,
+    });
+    const queued = message({ stage: "discover", runId: run.id });
+
+    await worker.queue?.({ messages: [queued] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
+
+    expect(queued.ack).toHaveBeenCalledOnce();
+    expect(queued.retry).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges an unknown recovery-write failure and continues to later messages", async () => {
     const pipeline = queue();
     const firstRun = (await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() })).run;
     const secondRun = (await repository.createOrGetRun({ localDate: "2026-07-25", startedAt: now.toISOString() })).run;
@@ -372,7 +435,8 @@ describe("pipeline orchestration", () => {
 
     await worker.queue?.({ messages: [first, later] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
 
-    expect(first.retry).toHaveBeenCalledOnce();
+    expect(first.ack).toHaveBeenCalledOnce();
+    expect(first.retry).not.toHaveBeenCalled();
     expect(later.ack).toHaveBeenCalledOnce();
     expect(pipeline.send).toHaveBeenCalledWith({
       stage: "comments",
