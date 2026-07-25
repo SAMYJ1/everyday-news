@@ -22,9 +22,10 @@ export interface PipelineDeps {
     | "getSourceItem"
     | "listComments"
     | "getSuccessfulSummary"
-    | "saveSummary"
+    | "saveSummaryForClaim"
     | "claimCandidateForSummary"
-    | "setCandidateStatus"
+    | "completeSummaryClaim"
+    | "releaseSummaryClaim"
   >;
   now?: () => Date;
 }

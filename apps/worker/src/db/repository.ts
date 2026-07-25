@@ -341,7 +341,8 @@ export class Repository {
           rank = excluded.rank,
           status = excluded.status,
           selected_at = excluded.selected_at,
-          summary_claimed_at = NULL`
+          summary_claimed_at = NULL,
+          summary_claim_token = NULL`
       )
       .bind(
         candidate.id,
@@ -383,13 +384,14 @@ export class Repository {
 
   async claimCandidateForSummary(
     candidateId: string,
+    claimToken: string,
     claimedAt: string,
     staleBefore: string,
   ): Promise<boolean> {
     const result = await this.db
       .prepare(
         `UPDATE candidates
-        SET status = 'summarizing', summary_claimed_at = ?
+        SET status = 'summarizing', summary_claimed_at = ?, summary_claim_token = ?
         WHERE id = ? AND (
           status IN ('selected', 'comments_ready', 'failed', 'summarized')
           OR (
@@ -398,7 +400,94 @@ export class Repository {
           )
         )`
       )
-      .bind(claimedAt, candidateId, staleBefore)
+      .bind(claimedAt, claimToken, candidateId, staleBefore)
+      .run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async saveSummaryForClaim(
+    summary: KnowledgeCardRecord,
+    claimToken: string,
+  ): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `INSERT INTO summaries (
+          id, candidate_id, status, title_zh, one_line_fact, why_interesting,
+          comment_insights, caveats, confidence_note, model, prompt_version,
+          input_hash, generated_at, reviewed_at
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        FROM candidates
+        WHERE id = ? AND status = 'summarizing' AND summary_claim_token = ?
+        ON CONFLICT(id) DO UPDATE SET
+          candidate_id = excluded.candidate_id,
+          status = excluded.status,
+          title_zh = excluded.title_zh,
+          one_line_fact = excluded.one_line_fact,
+          why_interesting = excluded.why_interesting,
+          comment_insights = excluded.comment_insights,
+          caveats = excluded.caveats,
+          confidence_note = excluded.confidence_note,
+          model = excluded.model,
+          prompt_version = excluded.prompt_version,
+          input_hash = excluded.input_hash,
+          generated_at = excluded.generated_at,
+          reviewed_at = excluded.reviewed_at
+        WHERE NOT (
+          summaries.status IN ('draft', 'approved', 'rejected')
+          AND excluded.status = 'failed'
+        )`
+      )
+      .bind(
+        summary.id,
+        summary.candidateId,
+        summary.status,
+        summary.titleZh,
+        summary.oneLineFact,
+        summary.whyInteresting,
+        JSON.stringify(summary.commentInsights),
+        JSON.stringify(summary.caveats),
+        summary.confidenceNote,
+        summary.model,
+        summary.promptVersion,
+        summary.inputHash,
+        summary.generatedAt,
+        summary.reviewedAt ?? null,
+        summary.candidateId,
+        claimToken,
+      )
+      .run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async completeSummaryClaim(
+    candidateId: string,
+    claimToken: string,
+    status: Extract<Candidate["status"], "summarized" | "failed">,
+  ): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE candidates
+        SET status = ?, summary_claimed_at = NULL, summary_claim_token = NULL
+        WHERE id = ? AND status = 'summarizing' AND summary_claim_token = ?`,
+      )
+      .bind(status, candidateId, claimToken)
+      .run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async releaseSummaryClaim(
+    candidateId: string,
+    claimToken: string,
+    status: Candidate["status"],
+  ): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE candidates
+        SET status = ?, summary_claimed_at = NULL, summary_claim_token = NULL
+        WHERE id = ? AND status = 'summarizing' AND summary_claim_token = ?`,
+      )
+      .bind(status, candidateId, claimToken)
       .run();
     return (result.meta.changes ?? 0) === 1;
   }
@@ -409,7 +498,9 @@ export class Repository {
   ): Promise<void> {
     await this.db
       .prepare(
-        "UPDATE candidates SET status = ?, summary_claimed_at = NULL WHERE id = ?",
+        `UPDATE candidates
+        SET status = ?, summary_claimed_at = NULL, summary_claim_token = NULL
+        WHERE id = ?`,
       )
       .bind(status, candidateId)
       .run();

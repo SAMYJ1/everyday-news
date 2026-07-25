@@ -265,11 +265,13 @@ describe("Repository", () => {
     const claims = await Promise.all([
       repository.claimCandidateForSummary(
         "candidate-1",
+        "claim-a",
         "2026-07-23T00:00:00.000Z",
         "2026-07-22T23:50:00.000Z",
       ),
       repository.claimCandidateForSummary(
         "candidate-1",
+        "claim-b",
         "2026-07-23T00:00:00.000Z",
         "2026-07-22T23:50:00.000Z",
       ),
@@ -279,6 +281,7 @@ describe("Repository", () => {
     expect(
       await repository.claimCandidateForSummary(
         "candidate-1",
+        "claim-c",
         "2026-07-23T00:20:00.000Z",
         "2026-07-23T00:10:00.000Z",
       ),
@@ -287,6 +290,7 @@ describe("Repository", () => {
     expect(
       await repository.claimCandidateForSummary(
         "candidate-1",
+        "claim-d",
         "2026-07-23T00:21:00.000Z",
         "2026-07-23T00:11:00.000Z",
       ),
@@ -311,6 +315,85 @@ describe("Repository", () => {
       status: "draft",
       titleZh: "有趣的事实",
       oneLineFact: "一条简短的事实。",
+    });
+  });
+
+  it("fences a stale summary owner after a newer owner reclaims the lease", async () => {
+    await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
+    await repository.upsertSourceItem(sourceItem());
+    await repository.saveCandidate(candidate());
+
+    expect(
+      await repository.claimCandidateForSummary(
+        "candidate-1",
+        "claim-a",
+        "2026-07-23T00:00:00.000Z",
+        "2026-07-22T23:50:00.000Z",
+      ),
+    ).toBe(true);
+    expect(
+      await repository.claimCandidateForSummary(
+        "candidate-1",
+        "claim-b",
+        "2026-07-23T00:20:00.000Z",
+        "2026-07-23T00:10:00.000Z",
+      ),
+    ).toBe(true);
+
+    expect(
+      await repository.saveSummaryForClaim(
+        summary({ titleZh: "过期结果" }),
+        "claim-a",
+      ),
+    ).toBe(false);
+    expect(
+      await repository.releaseSummaryClaim(
+        "candidate-1",
+        "claim-a",
+        "comments_ready",
+      ),
+    ).toBe(false);
+
+    expect(
+      await repository.saveSummaryForClaim(
+        summary({ titleZh: "最新结果" }),
+        "claim-b",
+      ),
+    ).toBe(true);
+    expect(
+      await repository.saveSummaryForClaim(
+        summary({
+          status: "failed",
+          titleZh: "",
+          oneLineFact: "",
+          whyInteresting: "",
+          commentInsights: [],
+          caveats: [],
+          confidenceNote: "",
+        }),
+        "claim-b",
+      ),
+    ).toBe(false);
+    expect(
+      await repository.completeSummaryClaim(
+        "candidate-1",
+        "claim-b",
+        "summarized",
+      ),
+    ).toBe(true);
+    expect(
+      await repository.completeSummaryClaim(
+        "candidate-1",
+        "claim-a",
+        "failed",
+      ),
+    ).toBe(false);
+
+    expect(
+      await repository.getSuccessfulSummary("candidate-1", "v1", "sha256:test"),
+    ).toMatchObject({ status: "draft", titleZh: "最新结果" });
+    expect(await repository.getCandidate("run-1", "item-1")).toMatchObject({
+      status: "summarized",
     });
   });
 

@@ -35,12 +35,14 @@ const card = {
 function deps(existing: KnowledgeCardRecord | null = null): {
   deps: PipelineDeps & { generator: CardGenerator };
   generate: ReturnType<typeof vi.fn>;
-  saveSummary: ReturnType<typeof vi.fn>;
-  setCandidateStatus: ReturnType<typeof vi.fn>;
+  saveSummaryForClaim: ReturnType<typeof vi.fn>;
+  completeSummaryClaim: ReturnType<typeof vi.fn>;
+  releaseSummaryClaim: ReturnType<typeof vi.fn>;
 } {
   const generate = vi.fn(async () => card);
-  const saveSummary = vi.fn(async () => undefined);
-  const setCandidateStatus = vi.fn(async () => undefined);
+  const saveSummaryForClaim = vi.fn(async () => true);
+  const completeSummaryClaim = vi.fn(async () => true);
+  const releaseSummaryClaim = vi.fn(async () => true);
   return {
     deps: {
       reddit: {} as PipelineDeps["reddit"],
@@ -49,31 +51,48 @@ function deps(existing: KnowledgeCardRecord | null = null): {
         getSourceItem: vi.fn(async () => item),
         listComments: vi.fn(async () => [comment]),
         getSuccessfulSummary: vi.fn(async () => existing),
-        saveSummary,
+        saveSummaryForClaim,
         claimCandidateForSummary: vi.fn(async () => true),
-        setCandidateStatus,
+        completeSummaryClaim,
+        releaseSummaryClaim,
       } as unknown as PipelineDeps["repository"],
       generator: { generate },
       now: () => new Date(timestamp)
     },
     generate,
-    saveSummary,
-    setCandidateStatus,
+    saveSummaryForClaim,
+    completeSummaryClaim,
+    releaseSummaryClaim,
   };
 }
 
 describe("summarizeCandidate", () => {
   it("saves a generated card as a draft", async () => {
-    const { deps: pipelineDeps, generate, saveSummary, setCandidateStatus } = deps();
+    const {
+      deps: pipelineDeps,
+      generate,
+      saveSummaryForClaim,
+      completeSummaryClaim,
+    } = deps();
 
     await summarizeCandidate(pipelineDeps, candidate.runId, item.id);
 
+    const claimToken = (
+      pipelineDeps.repository.claimCandidateForSummary as ReturnType<typeof vi.fn>
+    ).mock.calls[0][1] as string;
     expect(generate).toHaveBeenCalledWith({ item, comments: [comment] });
-    expect(saveSummary).toHaveBeenCalledWith(expect.objectContaining({
-      candidateId: candidate.id, status: "draft", ...card, model: "@cf/meta/llama-3.1-8b-instruct-fast",
-      promptVersion: "v1", inputHash: expect.stringMatching(/^[a-f0-9]{64}$/), generatedAt: timestamp
-    }));
-    expect(setCandidateStatus).toHaveBeenLastCalledWith(candidate.id, "summarized");
+    expect(saveSummaryForClaim).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidateId: candidate.id, status: "draft", ...card, model: "@cf/meta/llama-3.1-8b-instruct-fast",
+        promptVersion: "v1", inputHash: expect.stringMatching(/^[a-f0-9]{64}$/), generatedAt: timestamp
+      }),
+      claimToken,
+    );
+    expect(completeSummaryClaim).toHaveBeenLastCalledWith(
+      candidate.id,
+      claimToken,
+      "summarized",
+    );
   });
 
   it("does not call AI or save another card when the input already succeeded", async () => {
@@ -81,32 +100,76 @@ describe("summarizeCandidate", () => {
       id: "summary-1", candidateId: candidate.id, status: "draft", ...card,
       model: "@cf/meta/llama-3.1-8b-instruct-fast", promptVersion: "v1", inputHash: "hash", generatedAt: timestamp
     };
-    const { deps: pipelineDeps, generate, saveSummary, setCandidateStatus } =
+    const { deps: pipelineDeps, generate, saveSummaryForClaim, completeSummaryClaim } =
       deps(existing);
 
     await summarizeCandidate(pipelineDeps, candidate.runId, item.id);
 
+    const claimToken = (
+      pipelineDeps.repository.claimCandidateForSummary as ReturnType<typeof vi.fn>
+    ).mock.calls[0][1] as string;
     expect(generate).not.toHaveBeenCalled();
-    expect(saveSummary).not.toHaveBeenCalled();
-    expect(setCandidateStatus).toHaveBeenCalledWith(candidate.id, "summarized");
+    expect(saveSummaryForClaim).not.toHaveBeenCalled();
+    expect(completeSummaryClaim).toHaveBeenCalledWith(
+      candidate.id,
+      claimToken,
+      "summarized",
+    );
   });
 
   it("records a failed summary when both model attempts are malformed", async () => {
-    const { deps: pipelineDeps, saveSummary } = deps();
+    const { deps: pipelineDeps, saveSummaryForClaim, completeSummaryClaim } = deps();
     pipelineDeps.generator.generate = vi.fn(async () => {
       throw new InvalidCardResponse("Malformed card");
     });
 
     await summarizeCandidate(pipelineDeps, candidate.runId, item.id);
 
-    expect(saveSummary).toHaveBeenCalledWith(expect.objectContaining({
-      candidateId: candidate.id, status: "failed", model: "@cf/meta/llama-3.1-8b-instruct-fast", promptVersion: "v1"
-    }));
+    const claimToken = (
+      pipelineDeps.repository.claimCandidateForSummary as ReturnType<typeof vi.fn>
+    ).mock.calls[0][1] as string;
+    expect(saveSummaryForClaim).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidateId: candidate.id, status: "failed", model: "@cf/meta/llama-3.1-8b-instruct-fast", promptVersion: "v1"
+      }),
+      claimToken,
+    );
+    expect(completeSummaryClaim).toHaveBeenCalledWith(
+      candidate.id,
+      claimToken,
+      "failed",
+    );
+  });
+
+  it("does not mark a preserved successful summary as failed", async () => {
+    const existing: KnowledgeCardRecord = {
+      id: "summary-1", candidateId: candidate.id, status: "draft", ...card,
+      model: "@cf/meta/llama-3.1-8b-instruct-fast", promptVersion: "v1", inputHash: "hash", generatedAt: timestamp
+    };
+    const { deps: pipelineDeps, saveSummaryForClaim, completeSummaryClaim } = deps();
+    pipelineDeps.generator.generate = vi.fn(async () => {
+      throw new InvalidCardResponse("Malformed card");
+    });
+    saveSummaryForClaim.mockResolvedValue(false);
+    pipelineDeps.repository.getSuccessfulSummary = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(existing);
+
+    await summarizeCandidate(pipelineDeps, candidate.runId, item.id);
+
+    const claimToken = (
+      pipelineDeps.repository.claimCandidateForSummary as ReturnType<typeof vi.fn>
+    ).mock.calls[0][1] as string;
+    expect(completeSummaryClaim).toHaveBeenCalledWith(
+      candidate.id,
+      claimToken,
+      "summarized",
+    );
   });
 
   it("rethrows transport failures, releases the claim, and does not save failed output", async () => {
     const failure = new Error("Workers AI unavailable");
-    const { deps: pipelineDeps, saveSummary, setCandidateStatus } = deps();
+    const { deps: pipelineDeps, saveSummaryForClaim, releaseSummaryClaim } = deps();
     pipelineDeps.generator.generate = vi.fn(async () => {
       throw failure;
     });
@@ -115,8 +178,15 @@ describe("summarizeCandidate", () => {
       summarizeCandidate(pipelineDeps, candidate.runId, item.id),
     ).rejects.toBe(failure);
 
-    expect(saveSummary).not.toHaveBeenCalled();
-    expect(setCandidateStatus).toHaveBeenCalledWith(candidate.id, candidate.status);
+    const claimToken = (
+      pipelineDeps.repository.claimCandidateForSummary as ReturnType<typeof vi.fn>
+    ).mock.calls[0][1] as string;
+    expect(saveSummaryForClaim).not.toHaveBeenCalled();
+    expect(releaseSummaryClaim).toHaveBeenCalledWith(
+      candidate.id,
+      claimToken,
+      candidate.status,
+    );
   });
 
   it("allows only the delivery that atomically claims the candidate to call AI", async () => {
@@ -147,6 +217,7 @@ describe("summarizeCandidate", () => {
 
     expect(pipelineDeps.repository.claimCandidateForSummary).toHaveBeenCalledWith(
       candidate.id,
+      expect.any(String),
       timestamp,
       "2026-07-23T23:50:00.000Z",
     );
@@ -155,14 +226,21 @@ describe("summarizeCandidate", () => {
 
   it("rethrows draft persistence failures instead of recording a failed model output", async () => {
     const failure = new Error("D1 write failed");
-    const { deps: pipelineDeps, saveSummary, setCandidateStatus } = deps();
-    saveSummary.mockRejectedValue(failure);
+    const { deps: pipelineDeps, saveSummaryForClaim, releaseSummaryClaim } = deps();
+    saveSummaryForClaim.mockRejectedValue(failure);
 
     await expect(
       summarizeCandidate(pipelineDeps, candidate.runId, item.id),
     ).rejects.toBe(failure);
 
-    expect(saveSummary).toHaveBeenCalledTimes(1);
-    expect(setCandidateStatus).toHaveBeenCalledWith(candidate.id, candidate.status);
+    const claimToken = (
+      pipelineDeps.repository.claimCandidateForSummary as ReturnType<typeof vi.fn>
+    ).mock.calls[0][1] as string;
+    expect(saveSummaryForClaim).toHaveBeenCalledTimes(1);
+    expect(releaseSummaryClaim).toHaveBeenCalledWith(
+      candidate.id,
+      claimToken,
+      candidate.status,
+    );
   });
 });

@@ -58,6 +58,7 @@ CREATE TABLE candidates (
   ),
   selected_at TEXT NOT NULL,
   summary_claimed_at TEXT,
+  summary_claim_token TEXT UNIQUE,
   UNIQUE(run_id, item_id),
   UNIQUE(run_id, rank)
 );
