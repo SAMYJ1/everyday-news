@@ -187,10 +187,29 @@ describe("Repository", () => {
 
     expect(await repository.listCards("draft")).toHaveLength(1);
 
-    await repository.recordReview("summary-1", "approve", "2026-07-23T01:00:00.000Z");
+    expect(
+      await repository.recordReview(
+        "summary-1",
+        "approve",
+        "2026-07-23T01:00:00.000Z",
+      ),
+    ).toBe(true);
+    expect(
+      await repository.recordReview(
+        "summary-1",
+        "approve",
+        "2026-07-23T01:01:00.000Z",
+      ),
+    ).toBe(false);
     expect(await repository.listCards("approved")).toHaveLength(1);
 
-    await repository.recordReview("summary-1", "reject", "2026-07-23T02:00:00.000Z");
+    expect(
+      await repository.recordReview(
+        "summary-1",
+        "reject",
+        "2026-07-23T02:00:00.000Z",
+      ),
+    ).toBe(true);
     expect(await repository.listCards("rejected")).toHaveLength(1);
   });
 

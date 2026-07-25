@@ -499,6 +499,58 @@ describe("source cleanup", () => {
     expect(await repository.getCard("summary-1")).toBeNull();
   });
 
+  it("rejects a stale review after cleanup and defensively hides a corrupted card status", async () => {
+    const item = sourceItem("t3_stale_review", {
+      fetchedAt: "2026-07-24T00:00:00.000Z",
+      lastCheckedAt: "2026-07-24T00:00:00.000Z",
+    });
+    await repository.createRun({
+      id: "run-1",
+      localDate: "2026-07-25",
+      startedAt: now.toISOString(),
+    });
+    await repository.upsertSourceItem(item);
+    await repository.replaceComments(item.id, [comment(item.id)]);
+    await repository.saveCandidate(candidate(item.id));
+    await repository.saveSummary(summary(`run-1:${item.id}`));
+    expect(await repository.getCard("summary-1")).toMatchObject({
+      id: "summary-1",
+      status: "draft",
+    });
+    const reddit = fakeReddit(
+      async (ids) => ids.map((id) => ({ id, deleted: false })),
+      async () => [],
+      async (ids) => ids.map((id) => ({ id, deleted: true })),
+    );
+    await syncSourceState({ repository, reddit } as PipelineDeps, now);
+
+    expect(
+      await repository.recordReview(
+        "summary-1",
+        "approve",
+        "2026-07-25T00:01:00.000Z",
+      ),
+    ).toBe(false);
+    expect(
+      await env.DB
+        .prepare("SELECT status FROM summaries WHERE id = ?")
+        .bind("summary-1")
+        .first(),
+    ).toEqual({ status: "source_deleted" });
+    expect(await repository.listCards("approved")).toEqual([]);
+    expect(await repository.getCard("summary-1")).toBeNull();
+
+    await env.DB
+      .prepare(
+        "UPDATE summaries SET status = 'approved', reviewed_at = ? WHERE id = ?",
+      )
+      .bind("2026-07-25T00:02:00.000Z", "summary-1")
+      .run();
+    expect(await repository.listCards()).toEqual([]);
+    expect(await repository.listCards("approved")).toEqual([]);
+    expect(await repository.getCard("summary-1")).toBeNull();
+  });
+
   it("runs cleanup before discovery using only the injected source adapter", async () => {
     await repository.upsertSourceItem(
       sourceItem("t3_retained", {

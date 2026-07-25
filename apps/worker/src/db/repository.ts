@@ -865,7 +865,23 @@ export class Repository {
   ): Promise<boolean> {
     const status: SummaryStatus = action === "approve" ? "approved" : "rejected";
     const result = await this.db
-      .prepare("UPDATE summaries SET status = ?, reviewed_at = ? WHERE id = ? AND status != ?")
+      .prepare(
+        `UPDATE summaries
+        SET status = ?, reviewed_at = ?
+        WHERE id = ? AND status != ? AND status != 'source_deleted'
+          AND EXISTS (
+            SELECT 1
+            FROM candidates
+            JOIN source_items ON source_items.id = candidates.item_id
+            WHERE candidates.id = summaries.candidate_id
+              AND source_items.deleted_at IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM source_comments
+                WHERE source_comments.item_id = source_items.id
+                  AND source_comments.deleted_at IS NOT NULL
+              )
+          )`,
+      )
       .bind(status, at, summaryId, status)
       .run();
     if ((result.meta.changes ?? 0) === 0) return false;
@@ -933,6 +949,12 @@ export class Repository {
             JOIN candidates ON candidates.id = summaries.candidate_id
             JOIN source_items ON source_items.id = candidates.item_id
             WHERE summaries.status != 'source_deleted'
+              AND source_items.deleted_at IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM source_comments
+                WHERE source_comments.item_id = source_items.id
+                  AND source_comments.deleted_at IS NOT NULL
+              )
             ORDER BY summaries.generated_at DESC`
           )
         : this.db
@@ -946,6 +968,12 @@ export class Repository {
               JOIN candidates ON candidates.id = summaries.candidate_id
               JOIN source_items ON source_items.id = candidates.item_id
               WHERE summaries.status = ?
+                AND source_items.deleted_at IS NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM source_comments
+                  WHERE source_comments.item_id = source_items.id
+                    AND source_comments.deleted_at IS NOT NULL
+                )
               ORDER BY summaries.generated_at DESC`
             )
             .bind(status);
@@ -965,7 +993,13 @@ export class Repository {
         FROM summaries
         JOIN candidates ON candidates.id = summaries.candidate_id
         JOIN source_items ON source_items.id = candidates.item_id
-        WHERE summaries.id = ? AND summaries.status != 'source_deleted'`,
+        WHERE summaries.id = ? AND summaries.status != 'source_deleted'
+          AND source_items.deleted_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM source_comments
+            WHERE source_comments.item_id = source_items.id
+              AND source_comments.deleted_at IS NOT NULL
+          )`,
       )
       .bind(summaryId)
       .first<SummaryRow>();
