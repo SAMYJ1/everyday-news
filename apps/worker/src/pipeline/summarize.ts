@@ -24,7 +24,8 @@ export async function sha256(input: string): Promise<string> {
 export async function summarizeCandidate(
   deps: PipelineDeps & { generator: CardGenerator },
   runId: string,
-  itemId: string
+  itemId: string,
+  regeneration?: { id: string; nonce: string },
 ): Promise<void> {
   const candidate = await deps.repository.getCandidate(runId, itemId);
   if (candidate === null) throw new Error(`Candidate not found for run ${runId} and item ${itemId}`);
@@ -35,7 +36,16 @@ export async function summarizeCandidate(
   ]);
   if (item === null) throw new Error(`Source item not found: ${itemId}`);
 
-  const inputHash = await sha256(JSON.stringify({ item, comments, promptVersion: PROMPT_VERSION }));
+  const requestedRegeneration = regeneration === undefined
+    ? await deps.repository.getActiveCardRegeneration(candidate.id)
+    : regeneration;
+  const regenerationRequest = requestedRegeneration === null
+    ? null
+    : requestedRegeneration === undefined
+    ? null
+    : await deps.repository.getPendingCardRegeneration(requestedRegeneration.id, requestedRegeneration.nonce, candidate.id);
+  if (requestedRegeneration !== undefined && requestedRegeneration !== null && regenerationRequest === null) return;
+  const inputHash = await sha256(JSON.stringify({ item, comments, promptVersion: PROMPT_VERSION, regenerationNonce: requestedRegeneration?.nonce }));
   const claimedAt = deps.now?.() ?? new Date();
   const staleBefore = new Date(
     claimedAt.getTime() - SUMMARY_CLAIM_LEASE_MS,
@@ -49,22 +59,25 @@ export async function summarizeCandidate(
   );
   if (!claimed) throw new SummaryClaimUnavailable();
 
-  const existing = await deps.repository.getSuccessfulSummary(
-    candidate.id,
-    PROMPT_VERSION,
-    inputHash,
-  );
+  const existing = requestedRegeneration === undefined || requestedRegeneration === null
+    ? await deps.repository.getSuccessfulSummary(
+        candidate.id,
+        PROMPT_VERSION,
+        inputHash,
+      )
+    : null;
   if (existing !== null) {
     await deps.repository.completeSummaryClaim(
       candidate.id,
       claimToken,
       "summarized",
     );
+    if (requestedRegeneration !== undefined && requestedRegeneration !== null) await deps.repository.completeCardRegeneration(requestedRegeneration.id, requestedRegeneration.nonce, claimedAt.toISOString());
     return;
   }
 
   const base: Pick<KnowledgeCardRecord, "id" | "candidateId" | "model" | "promptVersion" | "inputHash" | "generatedAt"> = {
-    id: `summary-${candidate.id}-${inputHash}`,
+    id: regenerationRequest?.summaryId ?? `summary-${candidate.id}-${inputHash}`,
     candidateId: candidate.id,
     model: CARD_MODEL,
     promptVersion: PROMPT_VERSION,
@@ -119,6 +132,7 @@ export async function summarizeCandidate(
         claimToken,
         "failed",
       );
+      if (requestedRegeneration !== undefined && requestedRegeneration !== null) await deps.repository.completeCardRegeneration(requestedRegeneration.id, requestedRegeneration.nonce, claimedAt.toISOString());
       return;
     } catch (persistenceError) {
       try {
@@ -145,6 +159,7 @@ export async function summarizeCandidate(
       claimToken,
       "summarized",
     );
+    if (requestedRegeneration !== undefined && requestedRegeneration !== null) await deps.repository.completeCardRegeneration(requestedRegeneration.id, requestedRegeneration.nonce, claimedAt.toISOString());
   } catch (error) {
     try {
       await deps.repository.releaseSummaryClaim(

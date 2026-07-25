@@ -63,6 +63,7 @@ async function clearDatabase(): Promise<void> {
   await env.DB.batch(
     [
       "review_actions",
+      "regeneration_requests",
       "summaries",
       "candidates",
       "source_comments",

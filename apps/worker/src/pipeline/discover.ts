@@ -26,6 +26,9 @@ export interface PipelineDeps {
     | "claimCandidateForSummary"
     | "completeSummaryClaim"
     | "releaseSummaryClaim"
+    | "getPendingCardRegeneration"
+    | "completeCardRegeneration"
+    | "getActiveCardRegeneration"
   >;
   now?: () => Date;
 }

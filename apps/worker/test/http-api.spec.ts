@@ -9,12 +9,12 @@ const now = new Date("2026-07-24T00:30:00.000Z");
 const adminKey = "test-admin-key";
 const appOrigin = "https://app.example.test";
 
-function queue() {
-  return { send: vi.fn(async () => undefined) };
+function queue(sendImplementation: (message: unknown) => Promise<void> = async () => undefined) {
+  return { send: vi.fn(sendImplementation) };
 }
 
 function environment(pipeline: ReturnType<typeof queue>) {
-  return { ...env, PIPELINE: pipeline, ADMIN_KEY: adminKey, APP_ORIGIN: appOrigin };
+  return { ...env, PIPELINE: pipeline, ADMIN_KEY: adminKey, APP_ORIGIN: appOrigin, REDDIT_USER_AGENT: "everyday-news-test" };
 }
 
 function item(id = "t3_post1"): SourceItem {
@@ -70,7 +70,7 @@ function card(candidateId: string): KnowledgeCardRecord {
 
 async function clearDatabase(): Promise<void> {
   await env.DB.batch(
-    ["review_actions", "summaries", "candidates", "source_comments", "source_items", "fetch_runs", "settings"]
+    ["review_actions", "regeneration_requests", "summaries", "candidates", "source_comments", "source_items", "fetch_runs", "settings"]
       .map((table) => env.DB.prepare(`DELETE FROM ${table}`)),
   );
 }
@@ -171,8 +171,52 @@ describe("protected HTTP API", () => {
     expect((await request(`/api/cards/${cardId}/regenerate`, init)).status).toBe(202);
     expect((await request(`/api/cards/${cardId}/regenerate`, init)).status).toBe(202);
     expect(pipeline.send).toHaveBeenCalledTimes(1);
-    expect(pipeline.send).toHaveBeenCalledWith({ stage: "summarize", runId, itemId: "t3_post1" });
-    expect(await repository.getCandidate(runId, "t3_post1")).toMatchObject({ id: candidateId, status: "comments_ready" });
+    expect(pipeline.send).toHaveBeenCalledWith(expect.objectContaining({ stage: "summarize", runId, itemId: "t3_post1", regeneration: expect.any(Object) }));
+    expect(await repository.getCandidate(runId, "t3_post1")).toMatchObject({ id: candidateId, status: "summarized" });
+  });
+
+  it("regenerates through AI with a unique request nonce and replaces the requested card", async () => {
+    const generated = {
+      titleZh: "重新生成的标题",
+      oneLineFact: "重新生成的事实。",
+      whyInteresting: "重新生成的原因。",
+      commentInsights: ["新的评论洞察。"],
+      caveats: ["新的注意事项。"],
+      confidenceNote: "新的置信说明。",
+    };
+    const generate = vi.fn(async () => generated);
+    worker = createWorker({ now: () => now, generator: { generate } });
+    const { cardId } = await seedCard(repository);
+    const init = { method: "POST", headers: authorizedHeaders({ "Content-Type": "application/json" }) };
+
+    expect((await request(`/api/cards/${cardId}/regenerate`, init)).status).toBe(202);
+    const message = pipeline.send.mock.calls[0][0];
+    expect(message).toMatchObject({ regeneration: { id: expect.any(String), nonce: expect.any(String) } });
+    const regeneration = (message as { regeneration: { id: string; nonce: string } }).regeneration;
+    expect(await repository.getPendingCardRegeneration(regeneration.id, regeneration.nonce, "run-1:t3_post1")).toEqual({ summaryId: cardId });
+    const queued = { body: message, ack: vi.fn(), retry: vi.fn() };
+    await worker.queue?.({ messages: [queued] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
+
+    expect(queued.retry).not.toHaveBeenCalled();
+    expect(queued.ack).toHaveBeenCalledOnce();
+    expect(await repository.getCandidate("run-1", "t3_post1")).toMatchObject({ status: "summarized" });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(await repository.getCard(cardId)).toMatchObject({ id: cardId, status: "draft", ...generated });
+  });
+
+  it("releases a failed regeneration delivery so the next request can enqueue it", async () => {
+    let failSend = true;
+    pipeline = queue(async () => {
+      if (failSend) throw new Error("queue unavailable");
+    });
+    const { cardId, runId } = await seedCard(repository);
+    const init = { method: "POST", headers: authorizedHeaders({ "Content-Type": "application/json" }) };
+
+    expect((await request(`/api/cards/${cardId}/regenerate`, init)).status).toBe(500);
+    expect(await repository.getCandidate(runId, "t3_post1")).toMatchObject({ status: "summarized" });
+    failSend = false;
+    expect((await request(`/api/cards/${cardId}/regenerate`, init)).status).toBe(202);
+    expect(pipeline.send).toHaveBeenCalledTimes(2);
   });
 
   it("returns an existing Shanghai-local run for a duplicate manual start", async () => {

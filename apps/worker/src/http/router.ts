@@ -4,6 +4,7 @@ import type { SummaryStatus } from "../domain";
 import { isAuthorized } from "./auth";
 
 const JSON_CONTENT_TYPE = "application/json";
+const DELIVERY_CLAIM_LEASE_MS = 60_000;
 const LISTABLE_CARD_STATUSES = new Set<SummaryStatus>(["draft", "approved", "rejected"]);
 
 export interface RouterDeps {
@@ -111,13 +112,30 @@ export async function routeRequest(request: Request, deps: RouterDeps): Promise<
     if (request.method === "POST" && regenerateId !== null) {
       const card = await repository.getCard(regenerateId);
       if (card === null) return error(request, env, 404, "not_found", "Card not found");
-      const regeneration = await repository.requestCardRegeneration(regenerateId, deps.now.toISOString());
+      const at = deps.now.toISOString();
+      const regeneration = await repository.createOrGetCardRegeneration(regenerateId, at);
       if (regeneration !== null) {
-        await env.PIPELINE.send({
-          stage: "summarize",
-          runId: regeneration.runId,
-          itemId: regeneration.itemId,
-        } satisfies PipelineMessage);
+        const token = crypto.randomUUID();
+        const claimed = await repository.claimCardRegenerationDelivery(
+          regeneration.id,
+          token,
+          at,
+          new Date(deps.now.getTime() - DELIVERY_CLAIM_LEASE_MS).toISOString(),
+        );
+        if (claimed) {
+          try {
+            await env.PIPELINE.send({
+              stage: "summarize",
+              runId: regeneration.runId,
+              itemId: regeneration.itemId,
+              regeneration: { id: regeneration.id, nonce: regeneration.nonce },
+            } satisfies PipelineMessage);
+            await repository.markCardRegenerationEnqueued(regeneration.id, token, at);
+          } catch (error) {
+            await repository.releaseCardRegenerationDelivery(regeneration.id, token);
+            throw error;
+          }
+        }
       }
       return json(request, env, { card: await repository.getCard(regenerateId) }, 202);
     }

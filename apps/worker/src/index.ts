@@ -15,6 +15,7 @@ import type { CardGenerator } from "./ai/workers-ai";
 
 const SHANGHAI_TIME_ZONE = "Asia/Shanghai";
 const SUMMARY_CLAIM_RETRY_DELAY_SECONDS = Math.ceil(SUMMARY_CLAIM_LEASE_MS / 1_000);
+const RUN_DELIVERY_CLAIM_LEASE_MS = 60_000;
 
 export class PipelineTemporaryFailure extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -62,9 +63,21 @@ export async function startRun(
     localDate,
     startedAt: now.toISOString(),
   });
-  if (result.created || result.run.status === "queued") {
-    await pipeline.send({ stage: "discover", runId: result.run.id });
-    await repository.markRunRunning(result.run.id);
+  const token = crypto.randomUUID();
+  const claimed = await repository.claimRunDiscoveryDelivery(
+    result.run.id,
+    token,
+    now.toISOString(),
+    new Date(now.getTime() - RUN_DELIVERY_CLAIM_LEASE_MS).toISOString(),
+  );
+  if (claimed) {
+    try {
+      await pipeline.send({ stage: "discover", runId: result.run.id });
+      await repository.markRunRunningForDiscoveryDelivery(result.run.id, token);
+    } catch (error) {
+      await repository.releaseRunDiscoveryDelivery(result.run.id, token);
+      throw error;
+    }
   }
   return result.run;
 }
@@ -171,7 +184,11 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             message.ack();
             return;
           }
-          if (completedSummaryStage(candidate.status)) {
+          if (
+            completedSummaryStage(candidate.status) &&
+            message.body.regeneration === undefined &&
+            await repository.getActiveCardRegeneration(candidate.id) === null
+          ) {
             await refreshRunStatus(repository, message.body.runId, current.toISOString());
             message.ack();
             return;
@@ -180,6 +197,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             { ...deps, generator: options.generator ?? new WorkersAiCardGenerator(env.AI) },
             message.body.runId,
             message.body.itemId,
+            message.body.regeneration,
           );
           await refreshRunStatus(repository, message.body.runId, current.toISOString());
           message.ack();

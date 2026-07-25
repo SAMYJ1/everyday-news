@@ -91,7 +91,7 @@ function message(body: { stage: "discover"; runId: string } | { stage: "comments
 
 async function clearDatabase(): Promise<void> {
   await env.DB.batch(
-    ["review_actions", "summaries", "candidates", "source_comments", "source_items", "fetch_runs", "settings"]
+    ["review_actions", "regeneration_requests", "summaries", "candidates", "source_comments", "source_items", "fetch_runs", "settings"]
       .map((table) => env.DB.prepare(`DELETE FROM ${table}`)),
   );
 }

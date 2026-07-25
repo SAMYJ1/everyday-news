@@ -10,4 +10,4 @@ export interface Env {
 export type PipelineMessage =
   | { stage: "discover"; runId: string }
   | { stage: "comments"; runId: string; itemId: string }
-  | { stage: "summarize"; runId: string; itemId: string };
+  | { stage: "summarize"; runId: string; itemId: string; regeneration?: { id: string; nonce: string } };

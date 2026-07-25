@@ -1,5 +1,12 @@
 import { applyD1Migrations, env } from "cloudflare:test";
 import initialMigration from "../migrations/0001_initial.sql?raw";
+import deliveryClaimsMigration from "../migrations/0002_delivery_claims.sql?raw";
+
+const triggerStart = deliveryClaimsMigration.indexOf("CREATE TRIGGER");
+const deliveryClaimQueries = [
+  ...deliveryClaimsMigration.slice(0, triggerStart).split(";").map((query) => query.trim()).filter(Boolean),
+  deliveryClaimsMigration.slice(triggerStart).trim(),
+];
 
 export async function applyMigrations(db: D1Database = env.DB): Promise<void> {
   await applyD1Migrations(db, [
@@ -9,6 +16,11 @@ export async function applyMigrations(db: D1Database = env.DB): Promise<void> {
         .split(";")
         .map((query) => query.trim())
         .filter(Boolean)
+    }
+    ,
+    {
+      name: "0002_delivery_claims.sql",
+      queries: deliveryClaimQueries
     }
   ]);
 }

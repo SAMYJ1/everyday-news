@@ -210,6 +210,28 @@ export class Repository {
       .run();
   }
 
+  async claimRunDiscoveryDelivery(runId: string, token: string, claimedAt: string, staleBefore: string): Promise<boolean> {
+    const result = await this.db.prepare(
+      `UPDATE fetch_runs SET discovery_claim_token = ?, discovery_claimed_at = ?
+      WHERE id = ? AND status = 'queued' AND
+        (discovery_claim_token IS NULL OR discovery_claimed_at IS NULL OR discovery_claimed_at <= ?)`,
+    ).bind(token, claimedAt, runId, staleBefore).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async releaseRunDiscoveryDelivery(runId: string, token: string): Promise<void> {
+    await this.db.prepare(
+      "UPDATE fetch_runs SET discovery_claim_token = NULL, discovery_claimed_at = NULL WHERE id = ? AND discovery_claim_token = ?",
+    ).bind(runId, token).run();
+  }
+
+  async markRunRunningForDiscoveryDelivery(runId: string, token: string): Promise<void> {
+    await this.db.prepare(
+      `UPDATE fetch_runs SET status = 'running', discovery_claim_token = NULL, discovery_claimed_at = NULL
+      WHERE id = ? AND status = 'queued' AND discovery_claim_token = ?`,
+    ).bind(runId, token).run();
+  }
+
   async markRunFailed(
     runId: string,
     errorCode: string,
@@ -695,10 +717,6 @@ export class Repository {
       .bind(status, at, summaryId, status)
       .run();
     if ((result.meta.changes ?? 0) === 0) return false;
-    await this.db
-      .prepare("INSERT INTO review_actions (summary_id, action, created_at) VALUES (?, ?, ?)")
-      .bind(summaryId, action, at)
-      .run();
     return true;
   }
 
@@ -801,36 +819,76 @@ export class Repository {
     return row === null ? null : toSummary(row);
   }
 
-  async requestCardRegeneration(
+  async createOrGetCardRegeneration(
     summaryId: string,
     at: string,
-  ): Promise<{ runId: string; itemId: string } | null> {
-    const row = await this.db
+  ): Promise<{ id: string; nonce: string; runId: string; itemId: string } | null> {
+    const existing = await this.db.prepare(
+      `SELECT id, nonce, run_id, item_id FROM regeneration_requests
+      WHERE summary_id = ? AND completed_at IS NULL`,
+    ).bind(summaryId).first<{ id: string; nonce: string; run_id: string; item_id: string }>();
+    if (existing !== null) return { id: existing.id, nonce: existing.nonce, runId: existing.run_id, itemId: existing.item_id };
+    const id = crypto.randomUUID();
+    const nonce = crypto.randomUUID();
+    await this.db
       .prepare(
-        `SELECT candidates.id, candidates.run_id, candidates.item_id
+        `INSERT INTO regeneration_requests (id, summary_id, candidate_id, run_id, item_id, nonce, created_at)
+        SELECT ?, summaries.id, candidates.id, candidates.run_id, candidates.item_id, ?, ?
         FROM summaries
         JOIN candidates ON candidates.id = summaries.candidate_id
         WHERE summaries.id = ?`,
       )
-      .bind(summaryId)
-      .first<{ id: string; run_id: string; item_id: string }>();
-    if (row === null) return null;
-
-    const result = await this.db
-      .prepare(
-        `UPDATE candidates
-        SET status = 'comments_ready', summary_claimed_at = NULL, summary_claim_token = NULL
-        WHERE id = ? AND status IN ('summarized', 'failed')`,
-      )
-      .bind(row.id)
+      .bind(id, nonce, at, summaryId)
       .run();
-    if ((result.meta.changes ?? 0) === 0) return null;
+    const request = await this.db.prepare(
+      `SELECT id, nonce, run_id, item_id FROM regeneration_requests
+      WHERE summary_id = ? AND completed_at IS NULL`,
+    ).bind(summaryId).first<{ id: string; nonce: string; run_id: string; item_id: string }>();
+    return request === null ? null : { id: request.id, nonce: request.nonce, runId: request.run_id, itemId: request.item_id };
+  }
 
-    await this.db
-      .prepare("INSERT INTO review_actions (summary_id, action, created_at) VALUES (?, 'regenerate', ?)")
-      .bind(summaryId, at)
-      .run();
-    return { runId: row.run_id, itemId: row.item_id };
+  async claimCardRegenerationDelivery(id: string, token: string, claimedAt: string, staleBefore: string): Promise<boolean> {
+    const result = await this.db.prepare(
+      `UPDATE regeneration_requests SET delivery_claim_token = ?, delivery_claimed_at = ?
+      WHERE id = ? AND completed_at IS NULL AND enqueued_at IS NULL AND
+        (delivery_claim_token IS NULL OR delivery_claimed_at IS NULL OR delivery_claimed_at <= ?)`,
+    ).bind(token, claimedAt, id, staleBefore).run();
+    return (result.meta.changes ?? 0) === 1;
+  }
+
+  async releaseCardRegenerationDelivery(id: string, token: string): Promise<void> {
+    await this.db.prepare(
+      "UPDATE regeneration_requests SET delivery_claim_token = NULL, delivery_claimed_at = NULL WHERE id = ? AND delivery_claim_token = ?",
+    ).bind(id, token).run();
+  }
+
+  async markCardRegenerationEnqueued(id: string, token: string, enqueuedAt: string): Promise<void> {
+    await this.db.prepare(
+      `UPDATE regeneration_requests SET enqueued_at = ?, delivery_claim_token = NULL, delivery_claimed_at = NULL
+      WHERE id = ? AND delivery_claim_token = ?`,
+    ).bind(enqueuedAt, id, token).run();
+  }
+
+  async getPendingCardRegeneration(id: string, nonce: string, candidateId: string): Promise<{ summaryId: string } | null> {
+    const row = await this.db.prepare(
+      `SELECT summary_id FROM regeneration_requests
+      WHERE id = ? AND nonce = ? AND candidate_id = ? AND completed_at IS NULL`,
+    ).bind(id, nonce, candidateId).first<{ summary_id: string }>();
+    return row === null ? null : { summaryId: row.summary_id };
+  }
+
+  async getActiveCardRegeneration(candidateId: string): Promise<{ id: string; nonce: string; summaryId: string } | null> {
+    const row = await this.db.prepare(
+      "SELECT id, nonce, summary_id FROM regeneration_requests WHERE candidate_id = ? AND completed_at IS NULL",
+    ).bind(candidateId).first<{ id: string; nonce: string; summary_id: string }>();
+    return row === null ? null : { id: row.id, nonce: row.nonce, summaryId: row.summary_id };
+  }
+
+  async completeCardRegeneration(id: string, nonce: string, completedAt: string): Promise<void> {
+    await this.db.prepare(
+      `UPDATE regeneration_requests SET completed_at = ?, delivery_claim_token = NULL, delivery_claimed_at = NULL
+      WHERE id = ? AND nonce = ? AND completed_at IS NULL`,
+    ).bind(completedAt, id, nonce).run();
   }
 
   async setAnonymousEnabled(enabled: boolean, at = new Date().toISOString()): Promise<void> {
