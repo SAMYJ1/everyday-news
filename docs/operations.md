@@ -159,18 +159,24 @@ npx wrangler pages project list --json
 If and only if the exact project name `everyday-news` is absent, create it:
 
 ```sh
-npx wrangler pages project create everyday-news
+npx wrangler pages project create everyday-news --production-branch main
 ```
 
-Deploy to that one project:
+For an existing project, confirm its production branch is already `main` in
+the `pages project list --json` output before continuing. Deploy to that one
+project and explicitly classify the direct upload as a production-branch
+deployment:
 
 ```sh
-npx wrangler pages deploy apps/web/dist --project-name everyday-news
+npx wrangler pages deploy apps/web/dist --project-name everyday-news --branch main
 ```
 
-Copy the production Pages origin returned by Wrangler. Do not use a branch
-preview URL for CORS. Set it interactively and redeploy the Worker so its
-runtime configuration and code are current:
+Copy the actual production alias shown by Wrangler for that deployment (or the
+production custom-domain origin shown in the Pages dashboard). Do not use the
+unique deployment URL or any branch-preview URL for CORS, and do not assume the
+alias from the project name. Set the actual production alias/origin
+interactively and redeploy the Worker so its runtime configuration and code
+are current:
 
 ```sh
 npx wrangler secret put APP_ORIGIN --config apps/worker/wrangler.jsonc
@@ -235,12 +241,6 @@ curl --fail-with-body --silent --show-error \
 Re-enable only after the access problem has been resolved. This endpoint does
 not bypass Reddit access controls.
 
-Before closing the shell:
-
-```sh
-unset ADMIN_KEY WORKER_URL
-```
-
 ## 6. Browser acceptance
 
 Open the production Pages URL and verify:
@@ -273,6 +273,13 @@ unset LOCAL_DATE
 Confirm one run exists for the date and that previously stored
 `source + external_id` pairs were not duplicated. If Cron fails, record the
 typed stage and error; do not relax authorization or Reddit access handling.
+
+After the Cron probe (or before closing a shell in which no Cron probe will be
+run), clear the values:
+
+```sh
+unset ADMIN_KEY WORKER_URL
+```
 
 ## 8. OAuth adapter replacement prerequisites
 
