@@ -4,8 +4,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   plugins: [
     cloudflareTest({
-      miniflare: { d1Databases: ["DB"] },
-      wrangler: { configPath: "./wrangler.jsonc" }
+      main: "./src/index.ts",
+      remoteBindings: false,
+      miniflare: { d1Databases: ["DB"] }
     })
   ]
 });

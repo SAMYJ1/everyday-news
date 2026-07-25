@@ -133,6 +133,38 @@ function toSummaryRecord(row: Omit<SummaryRow, "title_en" | "reddit_url" | "sour
 export class Repository {
   constructor(private readonly db: D1Database) {}
 
+  async getRunByLocalDate(localDate: string): Promise<FetchRun | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT id, local_date, status, discovered_count, selected_count, summarized_count,
+          error_code, error_message, started_at, finished_at
+        FROM fetch_runs WHERE local_date = ?`,
+      )
+      .bind(localDate)
+      .first<FetchRunRow>();
+    return row === null ? null : toFetchRun(row);
+  }
+
+  async createOrGetRun(input: { localDate: string; startedAt: string }): Promise<{
+    run: FetchRun;
+    created: boolean;
+  }> {
+    const id = crypto.randomUUID();
+    const result = await this.db
+      .prepare(
+        `INSERT INTO fetch_runs (
+          id, local_date, status, discovered_count, selected_count, summarized_count,
+          error_code, error_message, started_at, finished_at
+        ) VALUES (?, ?, 'queued', 0, 0, 0, NULL, NULL, ?, NULL)
+        ON CONFLICT(local_date) DO NOTHING`,
+      )
+      .bind(id, input.localDate, input.startedAt)
+      .run();
+    const run = await this.getRunByLocalDate(input.localDate);
+    if (run === null) throw new Error(`Unable to create or load run for ${input.localDate}`);
+    return { run, created: (result.meta.changes ?? 0) === 1 };
+  }
+
   async createRun(input: { id: string; localDate: string; startedAt: string }): Promise<FetchRun> {
     const run: FetchRun = {
       id: input.id,
@@ -169,6 +201,79 @@ export class Repository {
       .run();
 
     return run;
+  }
+
+  async markRunRunning(runId: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE fetch_runs SET status = 'running' WHERE id = ? AND status = 'queued'")
+      .bind(runId)
+      .run();
+  }
+
+  async markRunFailed(
+    runId: string,
+    errorCode: string,
+    errorMessage: string,
+    finishedAt: string,
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE fetch_runs
+        SET status = 'failed', error_code = ?, error_message = ?, finished_at = ?
+        WHERE id = ?`,
+      )
+      .bind(errorCode, errorMessage, finishedAt, runId)
+      .run();
+  }
+
+  async markRunPartial(
+    runId: string,
+    errorCode: string,
+    errorMessage: string,
+    finishedAt: string,
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE fetch_runs
+        SET status = 'partial', error_code = ?, error_message = ?, finished_at = ?
+        WHERE id = ? AND status != 'failed'`,
+      )
+      .bind(errorCode, errorMessage, finishedAt, runId)
+      .run();
+  }
+
+  async refreshRunStatus(runId: string, finishedAt: string): Promise<void> {
+    const row = await this.db
+      .prepare(
+        `SELECT status, selected_count, discovery_completed_at,
+          (SELECT COUNT(*) FROM candidates WHERE run_id = fetch_runs.id AND status = 'summarized') AS summarized,
+          (SELECT COUNT(*) FROM candidates WHERE run_id = fetch_runs.id AND status = 'failed') AS failed
+        FROM fetch_runs WHERE id = ?`,
+      )
+      .bind(runId)
+      .first<{
+        status: FetchRun["status"];
+        selected_count: number;
+        discovery_completed_at: string | null;
+        summarized: number;
+        failed: number;
+      }>();
+    if (row === null || row.status === "failed" || row.discovery_completed_at === null) return;
+
+    const status: FetchRun["status"] =
+      row.failed > 0
+        ? "partial"
+        : row.summarized === row.selected_count
+          ? "completed"
+          : "running";
+    await this.db
+      .prepare(
+        `UPDATE fetch_runs
+        SET status = ?, summarized_count = ?, finished_at = ?
+        WHERE id = ?`,
+      )
+      .bind(status, row.summarized, status === "running" ? null : finishedAt, runId)
+      .run();
   }
 
   async getDiscoveryCheckpoint(runId: string): Promise<{

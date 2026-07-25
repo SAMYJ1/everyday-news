@@ -5,5 +5,16 @@
   "compatibility_date": "2026-07-23",
   "triggers": {
     "crons": ["0 0 * * *"]
-  }
+  },
+  "queues": {
+    "producers": [{ "binding": "PIPELINE", "queue": "everyday-news-pipeline" }],
+    "consumers": [{
+      "queue": "everyday-news-pipeline",
+      "max_batch_size": 5,
+      "max_batch_timeout": 5,
+      "max_retries": 2,
+      "dead_letter_queue": "everyday-news-dead-letter"
+    }]
+  },
+  "ai": { "binding": "AI" }
 }
