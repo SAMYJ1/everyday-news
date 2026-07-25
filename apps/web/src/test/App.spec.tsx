@@ -223,6 +223,43 @@ describe("App", () => {
     expect(latestCalls).toBe(3);
   });
 
+  it("keeps polling unchanged active runs and refreshes cards after completion", async () => {
+    vi.useFakeTimers();
+    const newDraft = card({ id: "card-new", titleZh: "运行后出现的新草稿" });
+    let latestCalls = 0;
+    let draftCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) {
+        latestCalls += 1;
+        const status = latestCalls < 4 ? (latestCalls === 1 ? "completed" : "running") : "completed";
+        return response({ run: {
+          id: latestCalls === 1 ? "run-1" : "run-2", localDate: "2026-07-24", status,
+          discoveredCount: 20, selectedCount: 5, summarizedCount: 3,
+          errorCode: null, errorMessage: null, startedAt: "2026-07-24T00:00:00.000Z", finishedAt: status === "completed" ? "2026-07-24T00:01:00.000Z" : null,
+        } });
+      }
+      if (url.includes("/api/cards?status=draft")) {
+        draftCalls += 1;
+        return response({ cards: draftCalls === 1 ? [] : [newDraft] });
+      }
+      if (url.endsWith("/api/runs") && init?.method === "POST") return response({ run: { id: "run-2" } }, 202);
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fireEvent.click(screen.getByRole("button", { name: "手动运行" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+    expect(latestCalls).toBe(4);
+    expect(screen.getByRole("heading", { name: /已完成/ })).toBeInTheDocument();
+    expect(screen.getByText("运行后出现的新草稿")).toBeInTheDocument();
+  });
+
   it("polls regeneration until a changed card is observable", async () => {
     vi.useFakeTimers();
     const replacement = card({
@@ -253,6 +290,30 @@ describe("App", () => {
     expect(detailCalls).toBe(2);
   });
 
+  it("does not append regenerated drafts after switching to another tab", async () => {
+    vi.useFakeTimers();
+    const replacement = card({ titleZh: "不应出现在已批准列表的草稿", inputHash: "replacement-hash", generatedAt: "2026-07-24T00:02:00.000Z" });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) return response({ run: null });
+      if (url.includes("status=draft")) return response({ cards: [draftCard] });
+      if (url.includes("status=approved")) return response({ cards: [] });
+      if (url.endsWith("/regenerate") && init?.method === "POST") return response({ card: draftCard }, 202);
+      if (url.endsWith("/api/cards/card-1")) return response({ card: replacement });
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fireEvent.click(screen.getByRole("button", { name: `重新生成 ${draftCard.titleZh}` }));
+    fireEvent.click(screen.getByRole("button", { name: "已批准" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+    expect(screen.getByRole("heading", { name: "已批准" })).toBeInTheDocument();
+    expect(screen.queryByText("不应出现在已批准列表的草稿")).not.toBeInTheDocument();
+  });
+
   it("uses the collector re-enable response instead of the historical run error", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -272,6 +333,27 @@ describe("App", () => {
     render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
 
     fireEvent.click(await screen.findByRole("button", { name: "重新启用" }));
+
+    expect(await screen.findByText("匿名采集：正常或待下一次检查")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重新启用" })).not.toBeInTheDocument();
+  });
+
+  it("keeps a collector re-enable result through an ordinary tab reload", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) return response({ run: {
+        id: "run-1", localDate: "2026-07-24", status: "failed", discoveredCount: 0, selectedCount: 0, summarizedCount: 0,
+        errorCode: "anonymous_disabled", errorMessage: "Collector disabled", startedAt: "2026-07-24T00:00:00.000Z", finishedAt: "2026-07-24T00:01:00.000Z",
+      } });
+      if (url.includes("/api/cards?status=")) return response({ cards: [] });
+      if (url.endsWith("/api/settings/anonymous-collection") && init?.method === "POST") return response({ anonymousCollection: { enabled: true, consecutiveFailures: 0 } });
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "重新启用" }));
+    fireEvent.click(screen.getByRole("button", { name: "已批准" }));
 
     expect(await screen.findByText("匿名采集：正常或待下一次检查")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "重新启用" })).not.toBeInTheDocument();

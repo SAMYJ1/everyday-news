@@ -29,6 +29,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
   const [startingRun, setStartingRun] = useState(false);
   const [enablingAnonymous, setEnablingAnonymous] = useState(false);
   const [collectorEnabled, setCollectorEnabled] = useState<boolean | undefined>();
+  const statusRef = useRef(status);
   const dashboardRequest = useRef(0);
   const dashboardAbort = useRef<AbortController | null>(null);
   const detailRequest = useRef(0);
@@ -49,6 +50,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
     setCards([]);
     setDetail(null);
     setRun(null);
+    setCollectorEnabled(undefined);
     setError("访问密钥无效，请重新输入。");
   }, []);
 
@@ -67,7 +69,6 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
       if (request !== dashboardRequest.current || controller.signal.aborted) return;
       setRun(latestRun);
       setCards(listedCards);
-      setCollectorEnabled(undefined);
     } catch (caught) {
       if (controller.signal.aborted || request !== dashboardRequest.current) return;
       if (caught instanceof ApiError && caught.status === 401) clearAccessKey();
@@ -76,6 +77,8 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
   }, [accessKey, api, clearAccessKey, status]);
 
   useEffect(() => { void loadDashboard(); }, [loadDashboard]);
+
+  useEffect(() => { statusRef.current = status; }, [status]);
 
   useEffect(() => () => {
     dashboardAbort.current?.abort();
@@ -88,17 +91,26 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
     if (run?.status !== "queued" && run?.status !== "running") return;
     let attempts = 0;
     let cancelled = false;
+    let timer: number | undefined;
+    const controller = new AbortController();
     const poll = async () => {
       if (cancelled || attempts++ >= MAX_POLL_ATTEMPTS) return;
       try {
-        const latestRun = await api.getLatestRun();
-        if (!cancelled) setRun(latestRun);
+        const latestRun = await api.getLatestRun({ signal: controller.signal });
+        if (cancelled) return;
+        setRun(latestRun);
+        if (latestRun?.status === "queued" || latestRun?.status === "running") {
+          timer = window.setTimeout(() => { void poll(); }, POLL_INTERVAL_MS);
+        } else {
+          const refreshedCards = await api.listCards(statusRef.current, { signal: controller.signal });
+          if (!cancelled) setCards(refreshedCards);
+        }
       } catch (caught) {
         if (!cancelled && caught instanceof ApiError && caught.status === 401) clearAccessKey();
       }
     };
-    const timer = window.setTimeout(() => { void poll(); }, POLL_INTERVAL_MS);
-    return () => { cancelled = true; window.clearTimeout(timer); };
+    timer = window.setTimeout(() => { void poll(); }, POLL_INTERVAL_MS);
+    return () => { cancelled = true; controller.abort(); window.clearTimeout(timer); };
   }, [api, clearAccessKey, run?.id, run?.status]);
 
   function submitAccessKey(event: React.FormEvent<HTMLFormElement>) {
@@ -106,6 +118,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
     const value = keyInput.trim();
     if (!value) return;
     window.sessionStorage.setItem(ACCESS_KEY_STORAGE, value);
+    setCollectorEnabled(undefined);
     setAccessKey(value);
     setKeyInput("");
   }
@@ -150,7 +163,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
             if (regenerateTimer.current !== null) window.clearInterval(regenerateTimer.current);
             setCards((current) => current.some((candidate) => candidate.id === updated.id)
               ? current.map((candidate) => candidate.id === updated.id ? updated : candidate)
-              : updated.status === status ? [...current, updated] : current);
+              : updated.status === statusRef.current ? [...current, updated] : current);
             setDetail((current) => current?.id === updated.id ? updated : current);
             return;
           }
@@ -240,7 +253,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
       <div className="section-heading">
         <div><p className="eyebrow">审核队列</p><h2 id="cards-heading">{status === "draft" ? "今日草稿" : status === "approved" ? "已批准" : "已淘汰"}</h2></div>
         <nav aria-label="卡片状态" className="status-tabs">
-          {(["draft", "approved", "rejected"] as const).map((candidateStatus) => <button key={candidateStatus} type="button" aria-pressed={status === candidateStatus} onClick={() => { setStatus(candidateStatus); setDetail(null); }}>
+          {(["draft", "approved", "rejected"] as const).map((candidateStatus) => <button key={candidateStatus} type="button" aria-pressed={status === candidateStatus} onClick={() => { statusRef.current = candidateStatus; setStatus(candidateStatus); setDetail(null); }}>
             {candidateStatus === "draft" ? "草稿" : candidateStatus === "approved" ? "已批准" : "已淘汰"}
           </button>)}
         </nav>
