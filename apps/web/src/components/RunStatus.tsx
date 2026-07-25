@@ -2,6 +2,7 @@ import type { FetchRun } from "../api/client";
 
 interface RunStatusProps {
   run: FetchRun | null;
+  runHistory: FetchRun[];
   isStarting: boolean;
   onStart: () => void;
   onEnableAnonymous: () => void;
@@ -17,11 +18,11 @@ const statusLabels = {
   failed: "失败",
 } as const;
 
-export function RunStatus({ run, isStarting, onStart, onEnableAnonymous, isEnablingAnonymous, collectorEnabled }: RunStatusProps) {
+export function RunStatus({ run, runHistory, isStarting, onStart, onEnableAnonymous, isEnablingAnonymous, collectorEnabled }: RunStatusProps) {
   const isActive = run?.status === "queued" || run?.status === "running";
   const collectorPaused = collectorEnabled === undefined ? run?.errorCode === "anonymous_disabled" : !collectorEnabled;
 
-  return (
+  return (<>
     <section className="run-status" aria-labelledby="run-status-heading">
       <div className="section-heading">
         <div>
@@ -53,5 +54,33 @@ export function RunStatus({ run, isStarting, onStart, onEnableAnonymous, isEnabl
         {run.errorMessage && <p className="run-error" role="status">{run.errorMessage}</p>}
       </>}
     </section>
-  );
+    <section className="run-history" aria-labelledby="run-history-heading">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">历史采集</p>
+          <h2 id="run-history-heading">运行记录</h2>
+        </div>
+      </div>
+      {runHistory.length === 0
+        ? <p className="empty-state">暂无运行记录。</p>
+        : <ol>
+          {runHistory.map((historyRun) => <li key={historyRun.id}>
+            <article aria-label={`${historyRun.localDate} 运行记录`}>
+              <h3>{historyRun.localDate} · {statusLabels[historyRun.status]}</h3>
+              <dl className="run-metrics">
+                {[
+                  ["发现", historyRun.discoveredCount],
+                  ["入选", historyRun.selectedCount],
+                  ["已生成", historyRun.summarizedCount],
+                  ["失败", historyRun.failedCount],
+                ].map(([label, count]) => <div key={label}>
+                  <dt>{label}</dt><dd>{count}</dd>
+                </div>)}
+              </dl>
+              {historyRun.errorMessage && <p><strong>最近失败原因：</strong>{historyRun.errorMessage}</p>}
+            </article>
+          </li>)}
+        </ol>}
+    </section>
+  </>);
 }

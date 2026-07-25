@@ -25,6 +25,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
   const [cards, setCards] = useState<KnowledgeCard[]>([]);
   const [detail, setDetail] = useState<KnowledgeCard | null>(null);
   const [run, setRun] = useState<FetchRun | null>(null);
+  const [runHistory, setRunHistory] = useState<FetchRun[]>([]);
   const [error, setError] = useState("");
   const [busyCardId, setBusyCardId] = useState<string | null>(null);
   const [startingRun, setStartingRun] = useState(false);
@@ -33,6 +34,9 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
   const statusRef = useRef(status);
   const historyDateRef = useRef(historyDate);
   const runLocalDateRef = useRef("");
+  const runHistoryFilterRef = useRef<string | undefined>(undefined);
+  const runHistoryRequest = useRef(0);
+  const runHistoryAbort = useRef<AbortController | null>(null);
   const dashboardRequest = useRef(0);
   const dashboardAbort = useRef<AbortController | null>(null);
   const detailRequest = useRef(0);
@@ -47,6 +51,8 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
   const clearAccessKey = useCallback(() => {
     window.sessionStorage.removeItem(ACCESS_KEY_STORAGE);
     dashboardAbort.current?.abort();
+    runHistoryAbort.current?.abort();
+    runHistoryRequest.current += 1;
     detailAbort.current?.abort();
     regenerateAbort.current?.abort();
     terminalRefreshAbort.current?.abort();
@@ -58,12 +64,35 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
     setCards([]);
     setDetail(null);
     setRun(null);
+    setRunHistory([]);
     setHistoryDate("");
     historyDateRef.current = "";
     runLocalDateRef.current = "";
     setCollectorEnabled(undefined);
     setError("访问密钥无效，请重新输入。");
   }, []);
+
+  const loadRunHistory = useCallback(async (requestedDate?: string) => {
+    if (!accessKey) return;
+    runHistoryAbort.current?.abort();
+    const controller = new AbortController();
+    runHistoryAbort.current = controller;
+    const request = ++runHistoryRequest.current;
+    runHistoryFilterRef.current = requestedDate;
+    setRunHistory([]);
+    try {
+      const runs = await api.listRuns(requestedDate, { signal: controller.signal });
+      if (
+        controller.signal.aborted ||
+        request !== runHistoryRequest.current ||
+        runHistoryFilterRef.current !== requestedDate
+      ) return;
+      setRunHistory(runs);
+    } catch (caught) {
+      if (controller.signal.aborted || request !== runHistoryRequest.current) return;
+      if (caught instanceof ApiError && caught.status === 401) clearAccessKey();
+    }
+  }, [accessKey, api, clearAccessKey]);
 
   const loadCards = useCallback(async (requestedStatus: CardStatus, requestedDate?: string) => {
     if (!accessKey) return;
@@ -108,9 +137,11 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
       historyDateRef.current = localDate;
       setRun(latestRun);
       setHistoryDate(localDate);
-      const listedCards = localDate === ""
-        ? await api.listCards("draft", { signal: controller.signal })
-        : await api.listCards("draft", localDate, { signal: controller.signal });
+      const listedCardsPromise = localDate === ""
+        ? api.listCards("draft", { signal: controller.signal })
+        : api.listCards("draft", localDate, { signal: controller.signal });
+      void loadRunHistory();
+      const listedCards = await listedCardsPromise;
       if (
         request !== dashboardRequest.current ||
         controller.signal.aborted ||
@@ -122,7 +153,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
       if (caught instanceof ApiError && caught.status === 401) clearAccessKey();
       else setError("无法加载审核数据，请稍后重试。");
     }
-  }, [accessKey, api, clearAccessKey]);
+  }, [accessKey, api, clearAccessKey, loadRunHistory]);
 
   useEffect(() => { void loadDashboard(); }, [loadDashboard]);
 
@@ -130,6 +161,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
 
   useEffect(() => () => {
     dashboardAbort.current?.abort();
+    runHistoryAbort.current?.abort();
     detailAbort.current?.abort();
     regenerateAbort.current?.abort();
     terminalRefreshAbort.current?.abort();
@@ -170,6 +202,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
           const refresh = refreshDate === ""
             ? api.listCards(refreshStatus, { signal: terminalController.signal })
             : api.listCards(refreshStatus, refreshDate, { signal: terminalController.signal });
+          void loadRunHistory(runHistoryFilterRef.current);
           void refresh.then((refreshedCards) => {
             const currentDate = refreshStatus === "draft"
               ? runLocalDateRef.current
@@ -192,7 +225,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
     };
     timer = window.setTimeout(() => { void poll(); }, POLL_INTERVAL_MS);
     return () => { cancelled = true; controller.abort(); window.clearTimeout(timer); };
-  }, [api, clearAccessKey, run?.id, run?.status]);
+  }, [api, clearAccessKey, loadRunHistory, run?.id, run?.status]);
 
   function submitAccessKey(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -321,6 +354,8 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
   function selectStatus(candidateStatus: CardStatus) {
     terminalRefreshAbort.current?.abort();
     terminalRefreshRequest.current += 1;
+    detailAbort.current?.abort();
+    detailRequest.current += 1;
     statusRef.current = candidateStatus;
     setStatus(candidateStatus);
     setDetail(null);
@@ -333,8 +368,12 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
   function selectHistoryDate(value: string) {
     terminalRefreshAbort.current?.abort();
     terminalRefreshRequest.current += 1;
+    detailAbort.current?.abort();
+    detailRequest.current += 1;
+    setDetail(null);
     historyDateRef.current = value;
     setHistoryDate(value);
+    void loadRunHistory(value || undefined);
     if (statusRef.current !== "draft") {
       void loadCards(statusRef.current, value || undefined);
     }
@@ -362,7 +401,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
       <p>先看这次运行，再处理今天的草稿。</p>
     </header>
     {error && <p className="app-error" role="alert">{error}</p>}
-    <RunStatus run={run} isStarting={startingRun} onStart={() => void startRun()} onEnableAnonymous={() => void enableAnonymous()} isEnablingAnonymous={enablingAnonymous} collectorEnabled={collectorEnabled} />
+    <RunStatus run={run} runHistory={runHistory} isStarting={startingRun} onStart={() => void startRun()} onEnableAnonymous={() => void enableAnonymous()} isEnablingAnonymous={enablingAnonymous} collectorEnabled={collectorEnabled} />
     <section className="cards-section" aria-labelledby="cards-heading">
       <div className="section-heading">
         <div><p className="eyebrow">审核队列</p><h2 id="cards-heading">{status === "draft" ? "今日草稿" : status === "approved" ? "已批准" : "已淘汰"}</h2></div>

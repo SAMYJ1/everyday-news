@@ -43,6 +43,23 @@ function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
+function runRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "run-history-1",
+    localDate: "2026-07-24",
+    status: "completed",
+    discoveredCount: 20,
+    selectedCount: 5,
+    summarizedCount: 4,
+    failedCount: 1,
+    errorCode: null,
+    errorMessage: null,
+    startedAt: "2026-07-24T00:00:00.000Z",
+    finishedAt: "2026-07-24T00:01:00.000Z",
+    ...overrides,
+  };
+}
+
 function installApiMock(runStatus: "running" | "partial" | "completed" = "partial") {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -115,6 +132,54 @@ describe("App", () => {
     expect(within(draft).getByText("候选分：87.5")).toBeInTheDocument();
     expect(within(draft).getByText("讨论热度高")).toBeInTheDocument();
     expect(within(draft).getByText("来源新鲜")).toBeInTheDocument();
+  });
+
+  it("loads and renders the newest run history", async () => {
+    const olderRun = runRecord({
+      id: "run-history-older",
+      localDate: "2026-07-23",
+      status: "partial",
+      discoveredCount: 18,
+      selectedCount: 4,
+      summarizedCount: 3,
+      failedCount: 1,
+      errorCode: "reddit_rate_limited",
+      errorMessage: "昨天的采集受到限流。",
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) return response({ run: runRecord() });
+      if (url.endsWith("/api/runs")) return response({ runs: [runRecord(), olderRun] });
+      if (url.includes("/api/cards?status=draft")) return response({ cards: [draftCard] });
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    const history = await screen.findByRole("region", { name: "运行记录" });
+    expect(fetchMock).toHaveBeenCalledWith("https://api.example.test/api/runs", expect.anything());
+    const older = within(history).getByRole("article", { name: "2026-07-23 运行记录" });
+    expect(within(older).getByRole("heading", { name: "2026-07-23 · 部分完成" })).toBeInTheDocument();
+    expect(within(older).getByText("18")).toBeInTheDocument();
+    expect(within(older).getByText("4")).toBeInTheDocument();
+    expect(within(older).getByText("3")).toBeInTheDocument();
+    expect(within(older).getByText("1")).toBeInTheDocument();
+    expect(within(older).getByText("昨天的采集受到限流。")).toBeInTheDocument();
+  });
+
+  it("shows an empty run history state", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) return response({ run: null });
+      if (url.endsWith("/api/runs")) return response({ runs: [] });
+      if (url.includes("/api/cards?status=draft")) return response({ cards: [] });
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    const history = await screen.findByRole("region", { name: "运行记录" });
+    expect(within(history).getByText("暂无运行记录。")).toBeInTheDocument();
   });
 
   it("approves a draft and removes it from the draft list", async () => {
@@ -249,6 +314,71 @@ describe("App", () => {
     );
   });
 
+  it("keeps run and card history on the latest selected date", async () => {
+    const oldCard = card({
+      id: "old-history-card",
+      status: "approved",
+      titleZh: "不应覆盖新日期的旧卡片",
+      runLocalDate: "2026-07-20",
+    });
+    const newCard = card({
+      id: "new-history-card",
+      status: "approved",
+      titleZh: "最新选择日期的卡片",
+      runLocalDate: "2026-07-21",
+    });
+    let resolveOldRuns!: (value: Response) => void;
+    let resolveOldCards!: (value: Response) => void;
+    const oldRuns = new Promise<Response>((resolve) => { resolveOldRuns = resolve; });
+    const oldCards = new Promise<Response>((resolve) => { resolveOldCards = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) return response({ run: runRecord() });
+      if (url.endsWith("/api/runs")) return response({ runs: [runRecord()] });
+      if (url.endsWith("/api/runs?date=2026-07-20")) return oldRuns;
+      if (url.endsWith("/api/runs?date=2026-07-21")) return response({ runs: [runRecord({
+        id: "new-date-run",
+        localDate: "2026-07-21",
+        status: "failed",
+        discoveredCount: 12,
+        selectedCount: 4,
+        summarizedCount: 2,
+        failedCount: 2,
+        errorCode: "challenge",
+        errorMessage: "新日期遇到访问挑战。",
+      })] });
+      if (url.includes("status=draft")) return response({ cards: [draftCard] });
+      if (url.includes("status=approved&date=2026-07-20")) return oldCards;
+      if (url.includes("status=approved&date=2026-07-21")) return response({ cards: [newCard] });
+      if (url.includes("status=approved")) return response({ cards: [] });
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "已批准" }));
+    const date = screen.getByLabelText("历史日期");
+    fireEvent.change(date, { target: { value: "2026-07-20" } });
+    fireEvent.change(date, { target: { value: "2026-07-21" } });
+
+    expect(await screen.findByText("最新选择日期的卡片")).toBeInTheDocument();
+    const selectedRun = within(screen.getByRole("region", { name: "运行记录" }))
+      .getByRole("article", { name: "2026-07-21 运行记录" });
+    expect(within(selectedRun).getByRole("heading", { name: "2026-07-21 · 失败" })).toBeInTheDocument();
+    for (const count of ["12", "4"]) {
+      expect(within(selectedRun).getByText(count)).toBeInTheDocument();
+    }
+    expect(within(selectedRun).getAllByText("2")).toHaveLength(2);
+    expect(within(selectedRun).getByText("新日期遇到访问挑战。")).toBeInTheDocument();
+
+    resolveOldRuns(response({ runs: [runRecord({ id: "old-date-run", localDate: "2026-07-20" })] }));
+    resolveOldCards(response({ cards: [oldCard] }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("最新选择日期的卡片")).toBeInTheDocument();
+    expect(screen.queryByText("不应覆盖新日期的旧卡片")).not.toBeInTheDocument();
+    expect(screen.queryByRole("article", { name: "2026-07-20 运行记录" })).not.toBeInTheDocument();
+  });
+
   it("disables manual run while a run is active", async () => {
     vi.stubGlobal("fetch", installApiMock("running"));
     render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
@@ -322,6 +452,61 @@ describe("App", () => {
     resolveFirst(response({ card: draftCard }));
     await act(async () => { await Promise.resolve(); });
     expect(screen.getByRole("region", { name: "第二张卡片" })).toBeInTheDocument();
+  });
+
+  it("does not open a pending detail after switching status", async () => {
+    let resolveDetail!: (value: Response) => void;
+    const pendingDetail = new Promise<Response>((resolve) => { resolveDetail = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) return response({ run: null });
+      if (url.endsWith("/api/runs")) return response({ runs: [] });
+      if (url.includes("status=draft")) return response({ cards: [draftCard] });
+      if (url.includes("status=approved")) return response({ cards: [] });
+      if (url.endsWith("/api/cards/card-1")) return pendingDetail;
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: `查看 ${draftCard.titleZh}` }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/api/cards/card-1",
+      expect.anything(),
+    ));
+    fireEvent.click(screen.getByRole("button", { name: "已批准" }));
+    resolveDetail(response({ card: draftCard }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.queryByRole("region", { name: draftCard.titleZh })).not.toBeInTheDocument();
+  });
+
+  it("closes an open detail after switching history date", async () => {
+    const approved = card({
+      id: "approved-detail",
+      status: "approved",
+      titleZh: "日期切换前打开的详情",
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) return response({ run: runRecord() });
+      if (url.endsWith("/api/runs") || url.includes("/api/runs?date=")) return response({ runs: [] });
+      if (url.includes("status=draft")) return response({ cards: [draftCard] });
+      if (url.includes("status=approved&date=2026-07-24")) return response({ cards: [approved] });
+      if (url.includes("status=approved&date=2026-07-20")) return response({ cards: [] });
+      if (url.endsWith("/api/cards/approved-detail")) return response({ card: approved });
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "已批准" }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看 日期切换前打开的详情" }));
+    expect(await screen.findByRole("region", { name: "日期切换前打开的详情" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("历史日期"), { target: { value: "2026-07-20" } });
+
+    expect(screen.queryByRole("region", { name: "日期切换前打开的详情" })).not.toBeInTheDocument();
   });
 
   it("polls an active manual run until it becomes terminal", async () => {

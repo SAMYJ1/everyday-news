@@ -80,6 +80,10 @@ export function createApiClient(baseUrl: string, getAdminKey: () => string) {
 
   return {
     getLatestRun: async (init?: RequestInit) => (await request<{ run: FetchRun | null }>("/api/runs/latest", init)).run,
+    listRuns: async (date?: string, init?: RequestInit) => {
+      const dateQuery = date === undefined ? "" : `?date=${encodeURIComponent(date)}`;
+      return (await request<{ runs: FetchRun[] }>(`/api/runs${dateQuery}`, init)).runs;
+    },
     listCards: async (status: CardStatus, dateOrInit?: string | RequestInit, requestInit?: RequestInit) => {
       const date = typeof dateOrInit === "string" ? dateOrInit : undefined;
       const init = typeof dateOrInit === "string" ? requestInit : dateOrInit;
