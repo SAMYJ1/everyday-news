@@ -48,8 +48,9 @@ export async function startRun(
     localDate,
     startedAt: now.toISOString(),
   });
-  if (result.created) {
+  if (result.created || result.run.status === "queued") {
     await pipeline.send({ stage: "discover", runId: result.run.id });
+    await repository.markRunRunning(result.run.id);
   }
   return result.run;
 }
@@ -87,14 +88,15 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
     try {
       switch (message.body.stage) {
         case "discover": {
-          if (await repository.getDiscoveryCheckpoint(message.body.runId)) {
-            message.ack();
-            return;
-          }
           await repository.markRunRunning(message.body.runId);
           const result = await discoverCandidates(deps, message.body.runId);
-          for (const itemId of result.itemIds) {
-            await env.PIPELINE.send({ stage: "comments", runId: message.body.runId, itemId });
+          try {
+            for (const itemId of result.itemIds) {
+              await env.PIPELINE.send({ stage: "comments", runId: message.body.runId, itemId });
+            }
+          } catch {
+            message.retry();
+            return;
           }
           await repository.refreshRunStatus(message.body.runId, current.toISOString());
           message.ack();
@@ -102,19 +104,46 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         }
         case "comments": {
           const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
-          if (candidate === null || completedCommentsStage(candidate.status)) {
+          if (candidate === null) {
+            message.ack();
+            return;
+          }
+          if (candidate.status === "comments_ready") {
+            try {
+              await env.PIPELINE.send({ ...message.body, stage: "summarize" });
+            } catch {
+              message.retry();
+              return;
+            }
+            message.ack();
+            return;
+          }
+          if (completedCommentsStage(candidate.status)) {
+            if (completedSummaryStage(candidate.status)) {
+              await repository.refreshRunStatus(message.body.runId, current.toISOString());
+            }
             message.ack();
             return;
           }
           await collectComments(deps, message.body.runId, message.body.itemId);
           await repository.setCandidateStatus(candidate.id, "comments_ready");
-          await env.PIPELINE.send({ ...message.body, stage: "summarize" });
+          try {
+            await env.PIPELINE.send({ ...message.body, stage: "summarize" });
+          } catch {
+            message.retry();
+            return;
+          }
           message.ack();
           return;
         }
         case "summarize": {
           const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
-          if (candidate === null || completedSummaryStage(candidate.status)) {
+          if (candidate === null) {
+            message.ack();
+            return;
+          }
+          if (completedSummaryStage(candidate.status)) {
+            await repository.refreshRunStatus(message.body.runId, current.toISOString());
             message.ack();
             return;
           }
@@ -130,7 +159,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
       }
     } catch (error) {
       if (error instanceof SummaryClaimUnavailable) {
-        message.ack();
+        message.retry();
         return;
       }
       if (isTemporaryFailure(error)) {
@@ -183,7 +212,11 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
     async queue(batch, env, _ctx) {
       const repository = new Repository(env.DB);
       for (const message of batch.messages) {
-        await processMessage(message, env, repository);
+        try {
+          await processMessage(message, env, repository);
+        } catch {
+          message.retry();
+        }
       }
     },
   };

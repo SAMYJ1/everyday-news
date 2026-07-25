@@ -260,6 +260,14 @@ export class Repository {
       }>();
     if (row === null || row.status === "failed" || row.discovery_completed_at === null) return;
 
+    if (row.status === "partial") {
+      await this.db
+        .prepare("UPDATE fetch_runs SET summarized_count = ? WHERE id = ?")
+        .bind(row.summarized, runId)
+        .run();
+      return;
+    }
+
     const status: FetchRun["status"] =
       row.failed > 0
         ? "partial"
