@@ -410,7 +410,7 @@ export class Repository {
       this.db
         .prepare(
           `DELETE FROM source_comments
-          WHERE item_id = ? AND EXISTS (
+          WHERE item_id = ? AND deleted_at IS NULL AND EXISTS (
             SELECT 1 FROM source_items
             WHERE source_items.id = ? AND source_items.deleted_at IS NULL
           )`,
@@ -425,7 +425,18 @@ export class Repository {
             )
             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             FROM source_items
-            WHERE id = ? AND deleted_at IS NULL`
+            WHERE id = ? AND deleted_at IS NULL
+            ON CONFLICT DO UPDATE SET
+              parent_external_id = excluded.parent_external_id,
+              author = excluded.author,
+              body = excluded.body,
+              score = excluded.score,
+              depth = excluded.depth,
+              reddit_url = excluded.reddit_url,
+              published_at = excluded.published_at,
+              fetched_at = excluded.fetched_at,
+              deleted_at = excluded.deleted_at
+            WHERE source_comments.deleted_at IS NULL`
           )
           .bind(
             comment.id,
@@ -543,14 +554,25 @@ export class Repository {
     commentId: string,
     deletedAt: string,
   ): Promise<void> {
-    await this.db
-      .prepare(
+    await this.db.batch([
+      this.db.prepare(
         `UPDATE source_comments
         SET body = '', author = NULL, deleted_at = COALESCE(deleted_at, ?)
         WHERE id = ?`,
       )
-      .bind(deletedAt, commentId)
-      .run();
+      .bind(deletedAt, commentId),
+      this.db.prepare(
+        `UPDATE summaries
+        SET status = 'source_deleted'
+        WHERE candidate_id IN (
+          SELECT candidates.id
+          FROM candidates
+          JOIN source_comments ON source_comments.item_id = candidates.item_id
+          WHERE source_comments.id = ? AND source_comments.deleted_at IS NOT NULL
+        )`,
+      )
+      .bind(commentId),
+    ]);
   }
 
   async listComments(itemId: string): Promise<SourceComment[]> {
@@ -669,6 +691,11 @@ export class Repository {
         WHERE candidates.id = ? AND candidates.status = 'summarizing'
           AND candidates.summary_claim_token = ?
           AND source_items.deleted_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM source_comments
+            WHERE source_comments.item_id = candidates.item_id
+              AND source_comments.deleted_at IS NOT NULL
+          )
         ON CONFLICT(id) DO UPDATE SET
           candidate_id = excluded.candidate_id,
           status = excluded.status,
@@ -787,6 +814,11 @@ export class Repository {
         FROM candidates
         JOIN source_items ON source_items.id = candidates.item_id
         WHERE candidates.id = ? AND source_items.deleted_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM source_comments
+            WHERE source_comments.item_id = candidates.item_id
+              AND source_comments.deleted_at IS NOT NULL
+          )
         ON CONFLICT(id) DO UPDATE SET
           candidate_id = excluded.candidate_id,
           status = excluded.status,

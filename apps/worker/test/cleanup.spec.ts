@@ -352,8 +352,15 @@ describe("source cleanup", () => {
       fetchedAt: "2026-07-24T00:00:00.000Z",
       lastCheckedAt: "2026-07-24T00:00:00.000Z",
     });
+    await repository.createRun({
+      id: "run-1",
+      localDate: "2026-07-25",
+      startedAt: now.toISOString(),
+    });
     await repository.upsertSourceItem(item);
     await repository.replaceComments(item.id, [comment(item.id)]);
+    await repository.saveCandidate(candidate(item.id));
+    await repository.saveSummary(summary(`run-1:${item.id}`));
     const checkedComments: string[][] = [];
     const reddit = fakeReddit(
       async (ids) => ids.map((id) => ({ id, deleted: false })),
@@ -381,6 +388,115 @@ describe("source cleanup", () => {
         deleted: true,
       }),
     ]);
+    expect(
+      await env.DB
+        .prepare("SELECT status FROM summaries WHERE id = ?")
+        .bind("summary-1")
+        .first(),
+    ).toEqual({ status: "source_deleted" });
+    expect(await repository.listCards()).toEqual([]);
+    expect(await repository.getCard("summary-1")).toBeNull();
+  });
+
+  it("preserves a deleted comment tombstone against a stale comment replacement", async () => {
+    const item = sourceItem("t3_live_stale_comment", {
+      fetchedAt: "2026-07-24T00:00:00.000Z",
+      lastCheckedAt: "2026-07-24T00:00:00.000Z",
+    });
+    await repository.upsertSourceItem(item);
+    await repository.replaceComments(item.id, [comment(item.id)]);
+    const reddit = fakeReddit(
+      async (ids) => ids.map((id) => ({ id, deleted: false })),
+      async () => [],
+      async (ids) => ids.map((id) => ({ id, deleted: true })),
+    );
+    await syncSourceState({ repository, reddit } as PipelineDeps, now);
+
+    await repository.replaceComments(item.id, [
+      {
+        ...comment(item.id),
+        author: "stale-author",
+        body: "This stale body was fetched before the deletion check completed.",
+        fetchedAt: "2026-07-25T00:01:00.000Z",
+        deletedAt: null,
+        deleted: false,
+      },
+    ]);
+
+    expect(await repository.listComments(item.id)).toEqual([
+      expect.objectContaining({
+        id: "t1_comment",
+        author: null,
+        body: "",
+        deletedAt: now.toISOString(),
+        deleted: true,
+      }),
+    ]);
+  });
+
+  it("fences stale and new summaries after an individual comment tombstone", async () => {
+    const item = sourceItem("t3_live_stale_summary", {
+      fetchedAt: "2026-07-24T00:00:00.000Z",
+      lastCheckedAt: "2026-07-24T00:00:00.000Z",
+    });
+    await repository.createRun({
+      id: "run-1",
+      localDate: "2026-07-25",
+      startedAt: now.toISOString(),
+    });
+    await repository.upsertSourceItem(item);
+    await repository.replaceComments(item.id, [comment(item.id)]);
+    await repository.saveCandidate(candidate(item.id));
+    await repository.saveSummary(summary(`run-1:${item.id}`));
+    expect(
+      await repository.claimCandidateForSummary(
+        `run-1:${item.id}`,
+        "stale-comment-summary-owner",
+        now.toISOString(),
+        "2026-07-24T00:00:00.000Z",
+      ),
+    ).toBe(true);
+    const reddit = fakeReddit(
+      async (ids) => ids.map((id) => ({ id, deleted: false })),
+      async () => [],
+      async (ids) => ids.map((id) => ({ id, deleted: true })),
+    );
+    await syncSourceState({ repository, reddit } as PipelineDeps, now);
+
+    expect(
+      await repository.saveSummaryForClaim(
+        {
+          ...summary(`run-1:${item.id}`),
+          titleZh: "过期摘要",
+        },
+        "stale-comment-summary-owner",
+      ),
+    ).toBe(false);
+    await repository.saveSummary({
+      ...summary(`run-1:${item.id}`),
+      titleZh: "直接恢复",
+    });
+    await repository.saveSummary({
+      ...summary(`run-1:${item.id}`),
+      id: "new-comment-summary",
+      inputHash: "sha256:new-comment-summary",
+      titleZh: "新摘要",
+    });
+
+    expect(
+      await env.DB
+        .prepare("SELECT status, title_zh FROM summaries WHERE id = ?")
+        .bind("summary-1")
+        .first(),
+    ).toEqual({ status: "source_deleted", title_zh: "中文标题" });
+    expect(
+      await env.DB
+        .prepare("SELECT id FROM summaries WHERE id = ?")
+        .bind("new-comment-summary")
+        .first(),
+    ).toBeNull();
+    expect(await repository.listCards()).toEqual([]);
+    expect(await repository.getCard("summary-1")).toBeNull();
   });
 
   it("runs cleanup before discovery using only the injected source adapter", async () => {
