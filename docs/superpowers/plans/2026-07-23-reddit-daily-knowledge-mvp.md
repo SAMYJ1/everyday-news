@@ -1000,6 +1000,107 @@ git commit -m "feat: sync deletions and stop unsafe collection"
 
 ---
 
+### Task 10A: Close Review Dashboard Data and Date-Filtering Gaps
+
+**Files:**
+- Modify: `apps/worker/src/domain.ts`
+- Modify: `apps/worker/src/db/repository.ts`
+- Modify: `apps/worker/src/http/router.ts`
+- Modify: `apps/worker/test/http-api.spec.ts`
+- Modify: `apps/worker/test/repository.spec.ts`
+- Modify: `apps/web/src/api/client.ts`
+- Modify: `apps/web/src/App.tsx`
+- Modify: `apps/web/src/components/RunStatus.tsx`
+- Modify: `apps/web/src/components/DraftCard.tsx`
+- Modify: `apps/web/src/components/CardDetail.tsx`
+- Modify: `apps/web/src/test/App.spec.tsx`
+
+**Interfaces:**
+- `FetchRun` adds `failedCount: number`.
+- `KnowledgeCard` adds:
+
+```ts
+candidateScore: number;
+selectionReasons: string[];
+commentLinks: string[];
+warnings: Array<{ code: string; message: string }>;
+runLocalDate: string;
+```
+
+- `GET /api/runs?date=YYYY-MM-DD` returns `{ runs: FetchRun[] }`; omit
+  `date` to return the newest 30 runs.
+- `GET /api/cards?status=draft|approved|rejected&date=YYYY-MM-DD` filters
+  by the candidate run's Shanghai local date. The `date` query is optional
+  for backward compatibility.
+
+- [ ] **Step 1: Write failing repository and API tests**
+
+Verify that latest/listed runs include the count of `failed` candidates,
+card rows expose candidate score/reasons, retained comment Reddit links,
+run warnings, and local date, and exact date filters exclude other runs.
+Reject malformed dates with the standard JSON error envelope.
+
+- [ ] **Step 2: Run Worker tests and verify failure**
+
+Run:
+
+```bash
+npm run test -w @everyday-news/worker -- repository.spec.ts http-api.spec.ts
+```
+
+Expected: FAIL because enriched projections and date filters do not exist.
+
+- [ ] **Step 3: Implement enriched read models**
+
+Use SQL aggregation/subqueries rather than per-card queries. Comment links
+must include only non-deleted stored comments and preserve deterministic
+score/id order. A run warning is present only when both `error_code` and
+`error_message` are non-null. Keep all `source_deleted`, deleted-parent,
+and deleted-comment invisibility predicates from Task 10.
+
+- [ ] **Step 4: Write failing dashboard tests**
+
+Verify:
+
+```ts
+it("shows failed count, candidate score, and selection reasons");
+it("shows participating comment links and run warnings in detail");
+it("loads today drafts using the latest run local date");
+it("filters approved and rejected history by the selected date");
+```
+
+Mock `fetch`; do not contact a live Worker.
+
+- [ ] **Step 5: Implement date-aware dashboard views**
+
+Load the latest run before the initial draft query and use its `localDate`
+as the date filter. Add a native labelled `type="date"` control for
+approved/rejected history and reload only the selected status/date. Render
+all returned strings as React text. Comment links must use
+`target="_blank"` and `rel="noreferrer noopener"`.
+
+- [ ] **Step 6: Run full validation**
+
+Run:
+
+```bash
+npm test
+npm run typecheck
+npm run build
+git diff --check
+```
+
+Expected: all tests pass and both production builds succeed.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/worker apps/web docs/superpowers/plans/2026-07-23-reddit-daily-knowledge-mvp.md
+git commit -m "feat: enrich review dashboard data"
+```
+
+---
+
 ### Task 11: Provision, Deploy, and Verify the MVP
 
 **Files:**
