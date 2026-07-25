@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Repository } from "../src/db/repository";
+import { InvalidCardResponse } from "../src/ai/workers-ai";
 import type { Candidate, KnowledgeCardRecord, SourceItem } from "../src/domain";
 import { createWorker } from "../src/index";
 import { applyMigrations } from "./apply-migrations";
@@ -217,6 +218,46 @@ describe("protected HTTP API", () => {
     failSend = false;
     expect((await request(`/api/cards/${cardId}/regenerate`, init)).status).toBe(202);
     expect(pipeline.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("makes concurrent regenerate requests share one durable request and delivery", async () => {
+    const { cardId } = await seedCard(repository);
+    const init = { method: "POST", headers: authorizedHeaders({ "Content-Type": "application/json" }) };
+
+    const responses = await Promise.all([
+      request(`/api/cards/${cardId}/regenerate`, init),
+      request(`/api/cards/${cardId}/regenerate`, init),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([202, 202]);
+    expect(pipeline.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("rearms an invalid regeneration so a later request can generate a replacement", async () => {
+    const generated = {
+      titleZh: "重试后的标题", oneLineFact: "重试后的事实。", whyInteresting: "重试后的原因。",
+      commentInsights: ["重试后的评论。"], caveats: ["重试后的注意事项。"], confidenceNote: "重试后的置信说明。",
+    };
+    let invalid = true;
+    const generate = vi.fn(async () => {
+      if (invalid) throw new InvalidCardResponse("Malformed card");
+      return generated;
+    });
+    worker = createWorker({ now: () => now, generator: { generate } });
+    const { cardId } = await seedCard(repository);
+    const init = { method: "POST", headers: authorizedHeaders({ "Content-Type": "application/json" }) };
+
+    await request(`/api/cards/${cardId}/regenerate`, init);
+    const first = pipeline.send.mock.calls[0][0];
+    await worker.queue?.({ messages: [{ body: first, ack: vi.fn(), retry: vi.fn() }] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
+    expect(await repository.getCard(cardId)).toMatchObject({ titleZh: "中文标题", status: "draft" });
+
+    invalid = false;
+    expect((await request(`/api/cards/${cardId}/regenerate`, init)).status).toBe(202);
+    const second = pipeline.send.mock.calls[1][0];
+    await worker.queue?.({ messages: [{ body: second, ack: vi.fn(), retry: vi.fn() }] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(await repository.getCard(cardId)).toMatchObject(generated);
   });
 
   it("returns an existing Shanghai-local run for a duplicate manual start", async () => {

@@ -836,7 +836,8 @@ export class Repository {
         SELECT ?, summaries.id, candidates.id, candidates.run_id, candidates.item_id, ?, ?
         FROM summaries
         JOIN candidates ON candidates.id = summaries.candidate_id
-        WHERE summaries.id = ?`,
+        WHERE summaries.id = ?
+        ON CONFLICT DO NOTHING`,
       )
       .bind(id, nonce, at, summaryId)
       .run();

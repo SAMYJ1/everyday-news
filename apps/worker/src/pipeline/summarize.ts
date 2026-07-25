@@ -113,16 +113,16 @@ export async function summarizeCandidate(
         confidenceNote: "",
       }, claimToken);
       if (!saved) {
-        const preserved = await deps.repository.getSuccessfulSummary(
+        await deps.repository.completeSummaryClaim(
           candidate.id,
-          PROMPT_VERSION,
-          inputHash,
+          claimToken,
+          "summarized",
         );
-        if (preserved !== null) {
-          await deps.repository.completeSummaryClaim(
-            candidate.id,
-            claimToken,
-            "summarized",
+        if (requestedRegeneration !== undefined && requestedRegeneration !== null) {
+          await deps.repository.completeCardRegeneration(
+            requestedRegeneration.id,
+            requestedRegeneration.nonce,
+            claimedAt.toISOString(),
           );
         }
         return;
