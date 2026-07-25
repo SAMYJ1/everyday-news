@@ -251,6 +251,7 @@ describe("App", () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     fireEvent.click(screen.getByRole("button", { name: "手动运行" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
@@ -258,6 +259,89 @@ describe("App", () => {
     expect(latestCalls).toBe(4);
     expect(screen.getByRole("heading", { name: /已完成/ })).toBeInTheDocument();
     expect(screen.getByText("运行后出现的新草稿")).toBeInTheDocument();
+  });
+
+  it("surfaces a terminal run and refreshes cards after an asynchronous response gap", async () => {
+    vi.useFakeTimers();
+    const terminalDraft = card({ id: "terminal-card", titleZh: "终态刷新后的草稿" });
+    let latestCalls = 0;
+    let resolveTerminalCards!: (value: Response) => void;
+    const terminalCards = new Promise<Response>((resolve) => { resolveTerminalCards = resolve; });
+    let draftCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) {
+        latestCalls += 1;
+        const status = latestCalls === 1 ? "completed" : latestCalls === 2 ? "running" : "completed";
+        return response({ run: {
+          id: latestCalls === 1 ? "run-1" : "run-2", localDate: "2026-07-24", status,
+          discoveredCount: 1, selectedCount: 1, summarizedCount: 1, errorCode: null, errorMessage: null,
+          startedAt: "2026-07-24T00:00:00.000Z", finishedAt: status === "completed" ? "2026-07-24T00:01:00.000Z" : null,
+        } });
+      }
+      if (url.includes("/api/cards?status=draft")) {
+        draftCalls += 1;
+        return draftCalls === 1 ? response({ cards: [] }) : terminalCards;
+      }
+      if (url.endsWith("/api/runs") && init?.method === "POST") return response({ run: { id: "run-2" } }, 202);
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fireEvent.click(screen.getByRole("button", { name: "手动运行" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(screen.getByRole("heading", { name: /已完成/ })).toBeInTheDocument();
+
+    resolveTerminalCards(response({ cards: [terminalDraft] }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("终态刷新后的草稿")).toBeInTheDocument();
+  });
+
+  it("does not let a delayed terminal refresh overwrite a newer tab", async () => {
+    vi.useFakeTimers();
+    const staleDraft = card({ id: "stale-draft", titleZh: "不应覆盖已批准列表的草稿" });
+    const approvedCard = card({ id: "approved-card", status: "approved", titleZh: "当前已批准卡片" });
+    let latestCalls = 0;
+    let resolveTerminalCards!: (value: Response) => void;
+    const terminalCards = new Promise<Response>((resolve) => { resolveTerminalCards = resolve; });
+    let draftCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) {
+        latestCalls += 1;
+        const status = latestCalls === 1 ? "completed" : latestCalls === 2 ? "running" : "completed";
+        return response({ run: {
+          id: latestCalls === 1 ? "run-1" : "run-2", localDate: "2026-07-24", status,
+          discoveredCount: 1, selectedCount: 1, summarizedCount: 1, errorCode: null, errorMessage: null,
+          startedAt: "2026-07-24T00:00:00.000Z", finishedAt: status === "completed" ? "2026-07-24T00:01:00.000Z" : null,
+        } });
+      }
+      if (url.includes("/api/cards?status=draft")) {
+        draftCalls += 1;
+        return draftCalls === 1 ? response({ cards: [] }) : terminalCards;
+      }
+      if (url.includes("/api/cards?status=approved")) return response({ cards: [approvedCard] });
+      if (url.endsWith("/api/runs") && init?.method === "POST") return response({ run: { id: "run-2" } }, 202);
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fireEvent.click(screen.getByRole("button", { name: "手动运行" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    fireEvent.click(screen.getByRole("button", { name: "已批准" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText("当前已批准卡片")).toBeInTheDocument();
+
+    resolveTerminalCards(response({ cards: [staleDraft] }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("当前已批准卡片")).toBeInTheDocument();
+    expect(screen.queryByText("不应覆盖已批准列表的草稿")).not.toBeInTheDocument();
   });
 
   it("polls regeneration until a changed card is observable", async () => {

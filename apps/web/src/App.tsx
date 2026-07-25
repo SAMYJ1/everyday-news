@@ -37,6 +37,8 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
   const regenerateRequest = useRef(0);
   const regenerateAbort = useRef<AbortController | null>(null);
   const regenerateTimer = useRef<number | null>(null);
+  const terminalRefreshRequest = useRef(0);
+  const terminalRefreshAbort = useRef<AbortController | null>(null);
 
   const api = useMemo(() => createApiClient(apiBaseUrl, () => accessKey), [apiBaseUrl, accessKey]);
   const clearAccessKey = useCallback(() => {
@@ -44,6 +46,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
     dashboardAbort.current?.abort();
     detailAbort.current?.abort();
     regenerateAbort.current?.abort();
+    terminalRefreshAbort.current?.abort();
     if (regenerateTimer.current !== null) window.clearInterval(regenerateTimer.current);
     setAccessKey("");
     setKeyInput("");
@@ -84,6 +87,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
     dashboardAbort.current?.abort();
     detailAbort.current?.abort();
     regenerateAbort.current?.abort();
+    terminalRefreshAbort.current?.abort();
     if (regenerateTimer.current !== null) window.clearInterval(regenerateTimer.current);
   }, []);
 
@@ -102,8 +106,19 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
         if (latestRun?.status === "queued" || latestRun?.status === "running") {
           timer = window.setTimeout(() => { void poll(); }, POLL_INTERVAL_MS);
         } else {
-          const refreshedCards = await api.listCards(statusRef.current, { signal: controller.signal });
-          if (!cancelled) setCards(refreshedCards);
+          setRun(latestRun);
+          terminalRefreshAbort.current?.abort();
+          const terminalController = new AbortController();
+          terminalRefreshAbort.current = terminalController;
+          const refreshRequest = ++terminalRefreshRequest.current;
+          const refreshStatus = statusRef.current;
+          void api.listCards(refreshStatus, { signal: terminalController.signal }).then((refreshedCards) => {
+            if (!terminalController.signal.aborted && refreshRequest === terminalRefreshRequest.current && statusRef.current === refreshStatus) {
+              setCards(refreshedCards);
+            }
+          }).catch((caught) => {
+            if (!terminalController.signal.aborted && caught instanceof ApiError && caught.status === 401) clearAccessKey();
+          });
         }
       } catch (caught) {
         if (!cancelled && caught instanceof ApiError && caught.status === 401) clearAccessKey();
@@ -253,7 +268,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
       <div className="section-heading">
         <div><p className="eyebrow">审核队列</p><h2 id="cards-heading">{status === "draft" ? "今日草稿" : status === "approved" ? "已批准" : "已淘汰"}</h2></div>
         <nav aria-label="卡片状态" className="status-tabs">
-          {(["draft", "approved", "rejected"] as const).map((candidateStatus) => <button key={candidateStatus} type="button" aria-pressed={status === candidateStatus} onClick={() => { statusRef.current = candidateStatus; setStatus(candidateStatus); setDetail(null); }}>
+          {(["draft", "approved", "rejected"] as const).map((candidateStatus) => <button key={candidateStatus} type="button" aria-pressed={status === candidateStatus} onClick={() => { terminalRefreshAbort.current?.abort(); terminalRefreshRequest.current += 1; statusRef.current = candidateStatus; setStatus(candidateStatus); setDetail(null); }}>
             {candidateStatus === "draft" ? "草稿" : candidateStatus === "approved" ? "已批准" : "已淘汰"}
           </button>)}
         </nav>
