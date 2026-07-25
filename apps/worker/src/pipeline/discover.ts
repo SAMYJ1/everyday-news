@@ -32,8 +32,10 @@ export interface PipelineDeps {
     | "listSourceItemsForCleanup"
     | "markSourceItemChecked"
     | "removeDeletedSourceItem"
+    | "removeDeletedSourceComment"
   >;
   now?: () => Date;
+  onDiscoveryRequestSucceeded?: (at: Date) => Promise<void>;
 }
 
 export async function discoverCandidates(
@@ -44,6 +46,7 @@ export async function discoverCandidates(
   if (checkpoint !== null) return checkpoint;
 
   const items = await deps.reddit.listTopPosts({ limit: DISCOVERY_LIMIT, time: "day" });
+  await deps.onDiscoveryRequestSucceeded?.(deps.now?.() ?? new Date());
   const uniqueItems = [
     ...new Map(items.map((item) => [item.externalId, item])).values(),
   ];

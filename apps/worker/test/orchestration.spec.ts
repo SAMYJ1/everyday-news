@@ -103,6 +103,7 @@ function reddit(overrides: Partial<{
     listTopPosts: vi.fn(overrides.listTopPosts ?? (async () => [item()])),
     getPostWithComments: vi.fn(overrides.getPostWithComments ?? (async (itemId: string) => ({ item: item(itemId), comments: [comment(itemId)] }))),
     checkItems: vi.fn(async () => []),
+    checkComments: vi.fn(async () => []),
   };
 }
 
@@ -415,6 +416,10 @@ describe("pipeline orchestration", () => {
 
     expect(queued.ack).toHaveBeenCalledOnce();
     expect(queued.retry).not.toHaveBeenCalled();
+    expect(await repository.getAnonymousCollection()).toEqual({
+      enabled: true,
+      consecutiveFailures: 1,
+    });
   });
 
   it("acknowledges an unknown recovery-write failure and continues to later messages", async () => {

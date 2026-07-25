@@ -41,7 +41,8 @@ function deps(comments: SourceComment[]): {
       reddit: {
         listTopPosts: vi.fn(),
         getPostWithComments,
-        checkItems: vi.fn()
+        checkItems: vi.fn(),
+        checkComments: vi.fn(),
       },
       repository: { replaceComments }
     } as unknown as PipelineDeps,

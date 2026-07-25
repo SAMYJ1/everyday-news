@@ -43,7 +43,8 @@ function deps(posts: SourceItem[], recentUrls = new Set<string>()): {
       reddit: {
         listTopPosts,
         getPostWithComments: vi.fn(),
-        checkItems: vi.fn()
+        checkItems: vi.fn(),
+        checkComments: vi.fn(),
       },
       repository: {
         getRecentSourceUrls: vi.fn(async () => recentUrls),
@@ -208,6 +209,7 @@ describe("discoverCandidates", () => {
         listTopPosts: vi.fn(async () => posts),
         getPostWithComments: vi.fn(),
         checkItems: vi.fn(),
+        checkComments: vi.fn(),
       },
       repository,
       now: () => now,
@@ -247,6 +249,7 @@ describe("discoverCandidates", () => {
           listTopPosts,
           getPostWithComments: vi.fn(),
           checkItems: vi.fn(),
+          checkComments: vi.fn(),
         },
         repository,
         now: () => now,

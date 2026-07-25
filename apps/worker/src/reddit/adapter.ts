@@ -10,4 +10,5 @@ export interface RedditSourceAdapter {
     comments: SourceComment[];
   }>;
   checkItems(ids: string[]): Promise<Array<{ id: string; deleted: boolean }>>;
+  checkComments(ids: string[]): Promise<Array<{ id: string; deleted: boolean }>>;
 }

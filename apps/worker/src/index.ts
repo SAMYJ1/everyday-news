@@ -143,6 +143,9 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         userAgent: env.REDDIT_USER_AGENT,
       }),
       now: clock,
+      onDiscoveryRequestSucceeded: async (at) => {
+        await repository.recordAnonymousSuccess(at.toISOString());
+      },
     };
   }
 
@@ -171,7 +174,6 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
           await repository.markRunRunning(message.body.runId);
           await syncSourceState(deps, current);
           const result = await discoverCandidates(deps, message.body.runId);
-          await repository.recordAnonymousSuccess(current.toISOString());
           for (const itemId of result.itemIds) {
             await sendPipeline(
               env.PIPELINE,
@@ -197,6 +199,18 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             if (completedSummaryStage(candidate.status)) {
               await refreshRunStatus(repository, message.body.runId, current.toISOString());
             }
+            message.ack();
+            return;
+          }
+          const anonymous = await repository.getAnonymousCollection();
+          if (!anonymous.enabled) {
+            await repository.setCandidateStatus(candidate.id, "failed");
+            await repository.markRunFailed(
+              message.body.runId,
+              "anonymous_disabled",
+              "Anonymous Reddit collection is disabled",
+              current.toISOString(),
+            );
             message.ack();
             return;
           }
@@ -241,6 +255,10 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
       if (accessCode !== null) {
         try {
           await recordAccessFailure(repository, accessCode, current.toISOString());
+        } catch {
+          // Breaker persistence is best effort; the run failure is independent.
+        }
+        try {
           await repository.markRunFailed(
             message.body.runId,
             accessCode,
@@ -248,7 +266,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             current.toISOString(),
           );
         } catch {
-          // Access denial is terminal even when its failure record cannot be persisted.
+          // Access denial is terminal even when its run failure cannot be persisted.
         }
         message.ack();
         return;

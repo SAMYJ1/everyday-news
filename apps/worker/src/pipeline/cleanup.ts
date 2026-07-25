@@ -38,6 +38,7 @@ export async function syncSourceState(
   );
   let checked = 0;
   let removed = 0;
+  const liveItems: typeof items = [];
 
   for (const result of results) {
     const item = byExternalId.get(result.id);
@@ -47,8 +48,32 @@ export async function syncSourceState(
       await deps.repository.removeDeletedSourceItem(item.id, checkedAt);
       removed += 1;
     } else {
-      await deps.repository.markSourceItemChecked(item.id, checkedAt);
+      liveItems.push(item);
     }
+  }
+
+  const retainedComments = (
+    await Promise.all(
+      liveItems.map((item) => deps.repository.listComments(item.id)),
+    )
+  ).flat().filter((comment) => !comment.deleted);
+  if (retainedComments.length > 0) {
+    const commentsByExternalId = new Map(
+      retainedComments.map((comment) => [comment.externalId, comment]),
+    );
+    const commentResults = await deps.reddit.checkComments(
+      retainedComments.map((comment) => comment.externalId),
+    );
+    for (const result of commentResults) {
+      const comment = commentsByExternalId.get(result.id);
+      if (result.deleted && comment !== undefined) {
+        await deps.repository.removeDeletedSourceComment(comment.id, checkedAt);
+      }
+    }
+  }
+
+  for (const item of liveItems) {
+    await deps.repository.markSourceItemChecked(item.id, checkedAt);
   }
 
   return { checked, removed };

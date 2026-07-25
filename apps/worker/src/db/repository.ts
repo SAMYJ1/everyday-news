@@ -11,6 +11,7 @@ import type {
 
 const ANONYMOUS_COLLECTION_KEY = "anonymous_collection";
 const ANONYMOUS_FAILURE_THRESHOLD = 3;
+const SHANGHAI_TIME_ZONE = "Asia/Shanghai";
 
 interface FetchRunRow {
   id: string;
@@ -59,6 +60,22 @@ interface CandidateRow {
   rank: number;
   status: Candidate["status"];
   selected_at: string;
+}
+
+function shanghaiLocalDate(at: string): string {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) {
+    throw new TypeError(`Invalid anonymous failure timestamp: ${at}`);
+  }
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: SHANGHAI_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const value = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value;
+  return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
 function toFetchRun(row: FetchRunRow): FetchRun {
@@ -366,7 +383,8 @@ export class Repository {
           published_at = excluded.published_at,
           fetched_at = excluded.fetched_at,
           last_checked_at = excluded.last_checked_at,
-          deleted_at = excluded.deleted_at`
+          deleted_at = excluded.deleted_at
+        WHERE source_items.deleted_at IS NULL`
       )
       .bind(
         item.id,
@@ -389,14 +407,25 @@ export class Repository {
 
   async replaceComments(itemId: string, comments: SourceComment[]): Promise<void> {
     const statements = [
-      this.db.prepare("DELETE FROM source_comments WHERE item_id = ?").bind(itemId),
+      this.db
+        .prepare(
+          `DELETE FROM source_comments
+          WHERE item_id = ? AND EXISTS (
+            SELECT 1 FROM source_items
+            WHERE source_items.id = ? AND source_items.deleted_at IS NULL
+          )`,
+        )
+        .bind(itemId, itemId),
       ...comments.map((comment) =>
         this.db
           .prepare(
             `INSERT INTO source_comments (
               id, item_id, external_id, parent_external_id, author, body, score, depth,
               reddit_url, published_at, fetched_at, deleted_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            )
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            FROM source_items
+            WHERE id = ? AND deleted_at IS NULL`
           )
           .bind(
             comment.id,
@@ -410,7 +439,8 @@ export class Repository {
             comment.redditUrl,
             comment.publishedAt ?? null,
             comment.fetchedAt,
-            comment.deletedAt
+            comment.deletedAt,
+            itemId,
           )
       )
     ];
@@ -507,6 +537,20 @@ export class Repository {
         )
         .bind(itemId),
     ]);
+  }
+
+  async removeDeletedSourceComment(
+    commentId: string,
+    deletedAt: string,
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE source_comments
+        SET body = '', author = NULL, deleted_at = COALESCE(deleted_at, ?)
+        WHERE id = ?`,
+      )
+      .bind(deletedAt, commentId)
+      .run();
   }
 
   async listComments(itemId: string): Promise<SourceComment[]> {
@@ -621,7 +665,10 @@ export class Repository {
         )
         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         FROM candidates
-        WHERE id = ? AND status = 'summarizing' AND summary_claim_token = ?
+        JOIN source_items ON source_items.id = candidates.item_id
+        WHERE candidates.id = ? AND candidates.status = 'summarizing'
+          AND candidates.summary_claim_token = ?
+          AND source_items.deleted_at IS NULL
         ON CONFLICT(id) DO UPDATE SET
           candidate_id = excluded.candidate_id,
           status = excluded.status,
@@ -636,7 +683,7 @@ export class Repository {
           input_hash = excluded.input_hash,
           generated_at = excluded.generated_at,
           reviewed_at = excluded.reviewed_at
-        WHERE NOT (
+        WHERE summaries.status != 'source_deleted' AND NOT (
           summaries.status IN ('draft', 'approved', 'rejected')
           AND excluded.status = 'failed'
         )`
@@ -735,7 +782,11 @@ export class Repository {
           id, candidate_id, status, title_zh, one_line_fact, why_interesting,
           comment_insights, caveats, confidence_note, model, prompt_version,
           input_hash, generated_at, reviewed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        FROM candidates
+        JOIN source_items ON source_items.id = candidates.item_id
+        WHERE candidates.id = ? AND source_items.deleted_at IS NULL
         ON CONFLICT(id) DO UPDATE SET
           candidate_id = excluded.candidate_id,
           status = excluded.status,
@@ -750,7 +801,7 @@ export class Repository {
           input_hash = excluded.input_hash,
           generated_at = excluded.generated_at,
           reviewed_at = excluded.reviewed_at
-        WHERE NOT (
+        WHERE summaries.status != 'source_deleted' AND NOT (
           summaries.status IN ('draft', 'approved', 'rejected')
           AND excluded.status = 'failed'
         )`
@@ -769,7 +820,8 @@ export class Repository {
         summary.promptVersion,
         summary.inputHash,
         summary.generatedAt,
-        summary.reviewedAt ?? null
+        summary.reviewedAt ?? null,
+        summary.candidateId,
       )
       .run();
   }
@@ -964,31 +1016,52 @@ export class Repository {
   async setAnonymousEnabled(enabled: boolean, at = new Date().toISOString()): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO settings (key, enabled, consecutive_failures, updated_at)
-        VALUES (?, ?, 0, ?)
+        `INSERT INTO settings (
+          key, enabled, consecutive_failures, updated_at, last_failure_local_date
+        )
+        VALUES (?, ?, 0, ?, NULL)
         ON CONFLICT(key) DO UPDATE SET
           enabled = excluded.enabled,
           consecutive_failures = 0,
-          updated_at = excluded.updated_at`
+          updated_at = excluded.updated_at,
+          last_failure_local_date = NULL`
       )
       .bind(ANONYMOUS_COLLECTION_KEY, enabled ? 1 : 0, at)
       .run();
   }
 
   async recordAnonymousFailure(at: string): Promise<AnonymousCollection> {
+    const localDate = shanghaiLocalDate(at);
     await this.db
       .prepare(
-        `INSERT INTO settings (key, enabled, consecutive_failures, updated_at)
-        VALUES (?, 1, 1, ?)
+        `INSERT INTO settings (
+          key, enabled, consecutive_failures, updated_at, last_failure_local_date
+        )
+        VALUES (?, 1, 1, ?, ?)
         ON CONFLICT(key) DO UPDATE SET
-          consecutive_failures = settings.consecutive_failures + 1,
+          consecutive_failures = CASE
+            WHEN settings.last_failure_local_date = excluded.last_failure_local_date
+              THEN settings.consecutive_failures
+            WHEN date(settings.last_failure_local_date, '+1 day') = excluded.last_failure_local_date
+              THEN settings.consecutive_failures + 1
+            ELSE 1
+          END,
           enabled = CASE
-            WHEN settings.consecutive_failures + 1 >= ? THEN 0
+            WHEN settings.last_failure_local_date != excluded.last_failure_local_date
+              AND date(settings.last_failure_local_date, '+1 day') = excluded.last_failure_local_date
+              AND settings.consecutive_failures + 1 >= ?
+              THEN 0
             ELSE settings.enabled
           END,
-          updated_at = excluded.updated_at`
+          updated_at = excluded.updated_at,
+          last_failure_local_date = excluded.last_failure_local_date`
       )
-      .bind(ANONYMOUS_COLLECTION_KEY, at, ANONYMOUS_FAILURE_THRESHOLD)
+      .bind(
+        ANONYMOUS_COLLECTION_KEY,
+        at,
+        localDate,
+        ANONYMOUS_FAILURE_THRESHOLD,
+      )
       .run();
 
     return this.getAnonymousCollection();
@@ -997,11 +1070,14 @@ export class Repository {
   async recordAnonymousSuccess(at: string): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO settings (key, enabled, consecutive_failures, updated_at)
-        VALUES (?, 1, 0, ?)
+        `INSERT INTO settings (
+          key, enabled, consecutive_failures, updated_at, last_failure_local_date
+        )
+        VALUES (?, 1, 0, ?, NULL)
         ON CONFLICT(key) DO UPDATE SET
           consecutive_failures = 0,
-          updated_at = excluded.updated_at`,
+          updated_at = excluded.updated_at,
+          last_failure_local_date = NULL`,
       )
       .bind(ANONYMOUS_COLLECTION_KEY, at)
       .run();

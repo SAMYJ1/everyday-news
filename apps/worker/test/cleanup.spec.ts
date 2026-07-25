@@ -100,6 +100,10 @@ function fakeReddit(
     ids: string[],
   ) => Promise<Array<{ id: string; deleted: boolean }>>,
   list: () => Promise<SourceItem[]> = async () => [],
+  checkComments: (
+    ids: string[],
+  ) => Promise<Array<{ id: string; deleted: boolean }>> = async (ids) =>
+    ids.map((id) => ({ id, deleted: false })),
 ): RedditSourceAdapter {
   return {
     listTopPosts: list,
@@ -107,12 +111,29 @@ function fakeReddit(
       throw new Error("getPostWithComments must not run during cleanup");
     },
     checkItems: check,
+    checkComments,
   };
 }
 
 function queueMessage(runId: string) {
   return {
     body: { stage: "discover" as const, runId },
+    ack: vi.fn(),
+    retry: vi.fn(),
+  };
+}
+
+function commentsMessage(runId: string, itemId: string) {
+  return {
+    body: { stage: "comments" as const, runId, itemId },
+    ack: vi.fn(),
+    retry: vi.fn(),
+  };
+}
+
+function summarizeMessage(runId: string, itemId: string) {
+  return {
+    body: { stage: "summarize" as const, runId, itemId },
     ack: vi.fn(),
     retry: vi.fn(),
   };
@@ -234,6 +255,134 @@ describe("source cleanup", () => {
     expect(await repository.getCard("summary-1")).toBeNull();
   });
 
+  it("fences stale source, comment, and summary writers after cleanup wins", async () => {
+    const item = sourceItem("t3_race", {
+      fetchedAt: "2026-07-24T00:00:00.000Z",
+      lastCheckedAt: "2026-07-24T00:00:00.000Z",
+    });
+    await repository.createRun({
+      id: "run-1",
+      localDate: "2026-07-25",
+      startedAt: now.toISOString(),
+    });
+    await repository.upsertSourceItem(item);
+    await repository.replaceComments(item.id, [comment(item.id)]);
+    await repository.saveCandidate(candidate(item.id));
+    await repository.saveSummary(summary(`run-1:${item.id}`));
+    expect(
+      await repository.claimCandidateForSummary(
+        `run-1:${item.id}`,
+        "stale-summary-owner",
+        now.toISOString(),
+        "2026-07-24T00:00:00.000Z",
+      ),
+    ).toBe(true);
+    const reddit = fakeReddit(async (ids) =>
+      ids.map((id) => ({ id, deleted: true })),
+    );
+    await syncSourceState({ repository, reddit } as PipelineDeps, now);
+
+    await repository.upsertSourceItem({
+      ...item,
+      title: "Stale restored title",
+      author: "stale-author",
+      sourceUrl: "https://example.test/stale",
+      lastCheckedAt: "2026-07-25T00:01:00.000Z",
+      deletedAt: null,
+    });
+    await repository.replaceComments(item.id, [
+      {
+        ...comment(item.id),
+        author: "stale-commenter",
+        body: "A stale comment body that must not return.",
+        fetchedAt: "2026-07-25T00:01:00.000Z",
+      },
+    ]);
+    await repository.saveSummary({
+      ...summary(`run-1:${item.id}`),
+      titleZh: "不应恢复",
+      status: "draft",
+    });
+    expect(
+      await repository.saveSummaryForClaim(
+        {
+          ...summary(`run-1:${item.id}`),
+          titleZh: "过期生成",
+          status: "draft",
+        },
+        "stale-summary-owner",
+      ),
+    ).toBe(false);
+    await repository.saveSummary({
+      ...summary(`run-1:${item.id}`),
+      id: "late-summary",
+      inputHash: "sha256:late",
+    });
+
+    expect(await repository.getSourceItem(item.id)).toMatchObject({
+      title: null,
+      author: null,
+      sourceUrl: null,
+      deletedAt: now.toISOString(),
+    });
+    expect(await repository.listComments(item.id)).toEqual([
+      expect.objectContaining({
+        author: null,
+        body: "",
+        deleted: true,
+      }),
+    ]);
+    expect(
+      await env.DB
+        .prepare("SELECT status, title_zh FROM summaries WHERE id = ?")
+        .bind("summary-1")
+        .first(),
+    ).toEqual({ status: "source_deleted", title_zh: "中文标题" });
+    expect(
+      await env.DB
+        .prepare("SELECT id FROM summaries WHERE id = ?")
+        .bind("late-summary")
+        .first(),
+    ).toBeNull();
+    expect(await repository.listCards()).toEqual([]);
+  });
+
+  it("scrubs a deleted stored comment while its parent post remains live", async () => {
+    const item = sourceItem("t3_live_parent", {
+      fetchedAt: "2026-07-24T00:00:00.000Z",
+      lastCheckedAt: "2026-07-24T00:00:00.000Z",
+    });
+    await repository.upsertSourceItem(item);
+    await repository.replaceComments(item.id, [comment(item.id)]);
+    const checkedComments: string[][] = [];
+    const reddit = fakeReddit(
+      async (ids) => ids.map((id) => ({ id, deleted: false })),
+      async () => [],
+      async (ids) => {
+        checkedComments.push(ids);
+        return ids.map((id) => ({ id, deleted: true }));
+      },
+    );
+
+    await expect(
+      syncSourceState({ repository, reddit } as PipelineDeps, now),
+    ).resolves.toEqual({ checked: 1, removed: 0 });
+
+    expect(checkedComments).toEqual([["t1_comment"]]);
+    expect(await repository.getSourceItem(item.id)).toMatchObject({
+      deletedAt: null,
+      lastCheckedAt: now.toISOString(),
+    });
+    expect(await repository.listComments(item.id)).toEqual([
+      expect.objectContaining({
+        author: null,
+        body: "",
+        deletedAt: now.toISOString(),
+        deleted: true,
+      }),
+    ]);
+  });
+
   it("runs cleanup before discovery using only the injected source adapter", async () => {
     await repository.upsertSourceItem(
       sourceItem("t3_retained", {
@@ -291,6 +440,27 @@ describe("anonymous access circuit breaker", () => {
     ).toEqual({ consecutiveFailures: 3, anonymousEnabled: false });
   });
 
+  it("counts failures once per consecutive Shanghai calendar day and resets after a gap", async () => {
+    expect(
+      await recordAccessFailure(repository, "forbidden", "2026-07-23T00:00:00.000Z"),
+    ).toEqual({ consecutiveFailures: 1, anonymousEnabled: true });
+    expect(
+      await recordAccessFailure(repository, "forbidden", "2026-07-23T15:59:59.000Z"),
+    ).toEqual({ consecutiveFailures: 1, anonymousEnabled: true });
+    expect(
+      await recordAccessFailure(repository, "forbidden", "2026-07-23T16:00:00.000Z"),
+    ).toEqual({ consecutiveFailures: 2, anonymousEnabled: true });
+    expect(
+      await recordAccessFailure(repository, "forbidden", "2026-07-25T16:00:00.000Z"),
+    ).toEqual({ consecutiveFailures: 1, anonymousEnabled: true });
+    expect(
+      await recordAccessFailure(repository, "forbidden", "2026-07-26T16:00:00.000Z"),
+    ).toEqual({ consecutiveFailures: 2, anonymousEnabled: true });
+    expect(
+      await recordAccessFailure(repository, "forbidden", "2026-07-27T16:00:00.000Z"),
+    ).toEqual({ consecutiveFailures: 3, anonymousEnabled: false });
+  });
+
   it("does not count failures outside the four access-control codes", async () => {
     await expect(
       recordAccessFailure(
@@ -328,6 +498,41 @@ describe("anonymous access circuit breaker", () => {
     });
   });
 
+  it("does not reset failures when a discovery checkpoint avoids every Reddit request", async () => {
+    await recordAccessFailure(repository, "challenge", "2026-07-23T00:00:00.000Z");
+    await recordAccessFailure(repository, "forbidden", "2026-07-24T00:00:00.000Z");
+    const { run } = await repository.createOrGetRun({
+      localDate: "2026-07-25",
+      startedAt: now.toISOString(),
+    });
+    await repository.completeDiscovery(
+      run.id,
+      { discovered: 0, selected: 0 },
+      "2026-07-24T00:00:00.000Z",
+    );
+    const reddit = {
+      listTopPosts: vi.fn(async () => []),
+      getPostWithComments: vi.fn(),
+      checkItems: vi.fn(async () => []),
+      checkComments: vi.fn(async () => []),
+    };
+    const worker = createWorker({ reddit, now: () => now });
+    const message = queueMessage(run.id);
+
+    await worker.queue?.(
+      { messages: [message] } as MessageBatch<never>,
+      { ...env, PIPELINE: { send: vi.fn() } } as never,
+      {} as ExecutionContext,
+    );
+
+    expect(reddit.listTopPosts).not.toHaveBeenCalled();
+    expect(reddit.checkItems).not.toHaveBeenCalled();
+    expect(await repository.getAnonymousCollection()).toEqual({
+      enabled: true,
+      consecutiveFailures: 2,
+    });
+  });
+
   it("manual re-enable resets failures and records the supplied audit time", async () => {
     await recordAccessFailure(repository, "unauthorized", "2026-07-22T00:00:00.000Z");
     await recordAccessFailure(repository, "forbidden", "2026-07-23T00:00:00.000Z");
@@ -341,10 +546,15 @@ describe("anonymous access circuit breaker", () => {
     });
     expect(
       await env.DB
-        .prepare("SELECT updated_at FROM settings WHERE key = ?")
+        .prepare(
+          "SELECT updated_at, last_failure_local_date FROM settings WHERE key = ?",
+        )
         .bind("anonymous_collection")
         .first(),
-    ).toEqual({ updated_at: now.toISOString() });
+    ).toEqual({
+      updated_at: now.toISOString(),
+      last_failure_local_date: null,
+    });
   });
 
   it("records anonymous_disabled and makes no Reddit call while collection is disabled", async () => {
@@ -357,6 +567,7 @@ describe("anonymous access circuit breaker", () => {
       listTopPosts: vi.fn(async () => []),
       getPostWithComments: vi.fn(),
       checkItems: vi.fn(async () => []),
+      checkComments: vi.fn(async () => []),
     };
     const worker = createWorker({ reddit, now: () => now });
     const message = queueMessage(run.id);
@@ -374,6 +585,132 @@ describe("anonymous access circuit breaker", () => {
     expect(await repository.getRunByLocalDate("2026-07-25")).toMatchObject({
       status: "failed",
       errorCode: "anonymous_disabled",
+    });
+  });
+
+  it("acks pending comment work without Reddit and fails its candidate when collection is disabled", async () => {
+    await repository.setAnonymousEnabled(false, "2026-07-24T00:00:00.000Z");
+    const { run } = await repository.createOrGetRun({
+      localDate: "2026-07-25",
+      startedAt: now.toISOString(),
+    });
+    const item = sourceItem("t3_pending_comments");
+    await repository.upsertSourceItem(item);
+    await repository.saveCandidate({
+      ...candidate(item.id),
+      id: `${run.id}:${item.id}`,
+      runId: run.id,
+      status: "selected",
+    });
+    const reddit = {
+      listTopPosts: vi.fn(async () => []),
+      getPostWithComments: vi.fn(async () => ({
+        item,
+        comments: [comment(item.id)],
+      })),
+      checkItems: vi.fn(async () => []),
+      checkComments: vi.fn(async () => []),
+    };
+    const worker = createWorker({ reddit, now: () => now });
+    const message = commentsMessage(run.id, item.id);
+
+    await worker.queue?.(
+      { messages: [message] } as MessageBatch<never>,
+      { ...env, PIPELINE: { send: vi.fn() } } as never,
+      {} as ExecutionContext,
+    );
+
+    expect(reddit.getPostWithComments).not.toHaveBeenCalled();
+    expect(message.ack).toHaveBeenCalledOnce();
+    expect(message.retry).not.toHaveBeenCalled();
+    expect(await repository.getCandidate(run.id, item.id)).toMatchObject({
+      status: "failed",
+    });
+    expect(await repository.getRunByLocalDate("2026-07-25")).toMatchObject({
+      status: "failed",
+      errorCode: "anonymous_disabled",
+    });
+  });
+
+  it("allows already-collected summaries to finish while Reddit collection is disabled", async () => {
+    await repository.setAnonymousEnabled(false, "2026-07-24T00:00:00.000Z");
+    await repository.createRun({
+      id: "run-1",
+      localDate: "2026-07-25",
+      startedAt: now.toISOString(),
+    });
+    const item = sourceItem("t3_ready_to_summarize");
+    await repository.upsertSourceItem(item);
+    await repository.replaceComments(item.id, [comment(item.id)]);
+    await repository.saveCandidate({
+      ...candidate(item.id),
+      status: "comments_ready",
+    });
+    await repository.completeDiscovery(
+      "run-1",
+      { discovered: 1, selected: 1 },
+      now.toISOString(),
+    );
+    const reddit = {
+      listTopPosts: vi.fn(async () => []),
+      getPostWithComments: vi.fn(),
+      checkItems: vi.fn(async () => []),
+      checkComments: vi.fn(async () => []),
+    };
+    const generate = vi.fn(async () => ({
+      titleZh: "可继续完成",
+      oneLineFact: "已有输入不需要再次访问 Reddit。",
+      whyInteresting: "避免丢弃已经安全收集的工作。",
+      commentInsights: ["评论已存储。"],
+      caveats: ["来源采集当前暂停。"],
+      confidenceNote: "仅使用已保存输入。",
+    }));
+    const worker = createWorker({
+      reddit,
+      generator: { generate },
+      now: () => now,
+    });
+    const message = summarizeMessage("run-1", item.id);
+
+    await worker.queue?.(
+      { messages: [message] } as MessageBatch<never>,
+      { ...env, PIPELINE: { send: vi.fn() } } as never,
+      {} as ExecutionContext,
+    );
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(reddit.listTopPosts).not.toHaveBeenCalled();
+    expect(reddit.getPostWithComments).not.toHaveBeenCalled();
+    expect(reddit.checkItems).not.toHaveBeenCalled();
+    expect(reddit.checkComments).not.toHaveBeenCalled();
+    expect(message.ack).toHaveBeenCalledOnce();
+    expect(await repository.listCards("draft")).toHaveLength(1);
+  });
+
+  it("persists the terminal run failure even when breaker persistence fails", async () => {
+    const { run } = await repository.createOrGetRun({
+      localDate: "2026-07-25",
+      startedAt: now.toISOString(),
+    });
+    vi.spyOn(Repository.prototype, "recordAnonymousFailure")
+      .mockRejectedValueOnce(new Error("settings unavailable"));
+    const reddit = fakeReddit(async () => [], async () => {
+      throw new RedditAccessDenied(403);
+    });
+    const worker = createWorker({ reddit, now: () => now });
+    const message = queueMessage(run.id);
+
+    await worker.queue?.(
+      { messages: [message] } as MessageBatch<never>,
+      { ...env, PIPELINE: { send: vi.fn() } } as never,
+      {} as ExecutionContext,
+    );
+
+    expect(message.ack).toHaveBeenCalledOnce();
+    expect(message.retry).not.toHaveBeenCalled();
+    expect(await repository.getRunByLocalDate("2026-07-25")).toMatchObject({
+      status: "failed",
+      errorCode: "forbidden",
     });
   });
 

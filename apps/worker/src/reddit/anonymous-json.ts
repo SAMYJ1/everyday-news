@@ -48,6 +48,78 @@ interface AnonymousJsonOptions {
 }
 
 const ORIGIN = "https://www.reddit.com";
+// A Reddit Listing slice defaults to 25. Keep each lookup at that documented
+// size and set the limit explicitly so omission remains a deletion signal.
+const LOOKUP_CHUNK_SIZE = 25;
+const MAX_BARE_FULLNAME_LENGTH = 32;
+
+type JsonRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function checkedListing(
+  value: unknown,
+  requested: Set<string>,
+  kind: "t1" | "t3",
+): Map<string, boolean> {
+  if (!isRecord(value) || !isRecord(value.data)) {
+    throw new TypeError("Invalid Reddit item-state listing");
+  }
+  const { data } = value;
+  if (!Array.isArray(data.children)) {
+    throw new TypeError("Invalid Reddit item-state listing children");
+  }
+  if (
+    (data.after !== null && data.after !== undefined) ||
+    (data.before !== null && data.before !== undefined)
+  ) {
+    throw new TypeError("Reddit item-state listing was paginated");
+  }
+  if (
+    typeof data.dist === "number" &&
+    Number.isFinite(data.dist) &&
+    data.dist !== data.children.length
+  ) {
+    throw new TypeError("Reddit item-state listing was incomplete");
+  }
+  if (data.children.length > requested.size) {
+    throw new TypeError("Reddit item-state listing exceeded its requested limit");
+  }
+
+  const found = new Map<string, boolean>();
+  for (const value of data.children) {
+    if (!isRecord(value) || value.kind !== kind || !isRecord(value.data)) {
+      throw new TypeError("Reddit item-state listing contained an unexpected child");
+    }
+    const name = value.data.name;
+    if (
+      typeof name !== "string" ||
+      !requested.has(name) ||
+      found.has(name)
+    ) {
+      throw new TypeError("Reddit item-state listing contained an invalid fullname");
+    }
+    const deleted = kind === "t3"
+      ? value.data.removed_by_category === "deleted" ||
+        value.data.title === "[deleted]" ||
+        value.data.selftext === "[deleted]"
+      : value.data.author === null ||
+        value.data.body === "[deleted]" ||
+        value.data.body === "[removed]";
+    found.set(name, deleted);
+  }
+  return found;
+}
+
+function chunks<T>(values: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    result.push(values.slice(index, index + size));
+  }
+  return result;
+}
 
 function retryAfterSeconds(value: string | null): number {
   if (!value) return 1;
@@ -126,29 +198,26 @@ export class AnonymousJsonRedditAdapter implements RedditSourceAdapter {
   }
 
   async checkItems(ids: string[]) {
-    if (ids.length === 0) return [];
-    const requested = ids.map((id) => ({
-      id,
-      fullname: `t3_${this.barePostId(id)}`,
-    }));
-    const url = this.url(
-      "/by_id/" + requested.map(({ fullname }) => fullname).join(",") + ".json",
-      { raw_json: 1 },
+    return this.checkFullnames(
+      ids,
+      "t3",
+      (fullnames) => this.url(
+        "/by_id/" + fullnames.join(",") + ".json",
+        { limit: fullnames.length, raw_json: 1 },
+      ),
     );
-    let items;
-    try {
-      items = parsePostListing(await this.requestJson(url));
-    } catch (error) {
-      this.rethrowTyped(error);
-      throw new RedditUnexpectedResponse("Invalid Reddit item check response", {
-        cause: error,
-      });
-    }
-    const found = new Map(items.map((item) => [item.externalId, item]));
-    return requested.map(({ id, fullname }) => ({
-      id,
-      deleted: found.get(fullname)?.deleted ?? true,
-    }));
+  }
+
+  async checkComments(ids: string[]) {
+    return this.checkFullnames(
+      ids,
+      "t1",
+      (fullnames) => this.url("/api/info.json", {
+        id: fullnames.join(","),
+        limit: fullnames.length,
+        raw_json: 1,
+      }),
+    );
   }
 
   private async requestJson(url: URL): Promise<unknown> {
@@ -236,12 +305,55 @@ export class AnonymousJsonRedditAdapter implements RedditSourceAdapter {
     return value;
   }
 
-  private barePostId(value: string): string {
-    const bare = value.startsWith("t3_") ? value.slice(3) : value;
-    if (!/^[A-Za-z0-9]+$/.test(bare)) {
-      throw new TypeError("Invalid Reddit post id");
+  private async checkFullnames(
+    ids: string[],
+    kind: "t1" | "t3",
+    urlFor: (fullnames: string[]) => URL,
+  ): Promise<Array<{ id: string; deleted: boolean }>> {
+    if (ids.length === 0) return [];
+    const requested = ids.map((id) => ({
+      id,
+      fullname: this.fullname(id, kind),
+    }));
+    const result: Array<{ id: string; deleted: boolean }> = [];
+
+    for (const chunk of chunks(requested, LOOKUP_CHUNK_SIZE)) {
+      const fullnames = chunk.map(({ fullname }) => fullname);
+      let found;
+      try {
+        found = checkedListing(
+          await this.requestJson(urlFor(fullnames)),
+          new Set(fullnames),
+          kind,
+        );
+      } catch (error) {
+        this.rethrowTyped(error);
+        throw new RedditUnexpectedResponse(
+          `Invalid Reddit ${kind === "t3" ? "item" : "comment"} check response`,
+          { cause: error },
+        );
+      }
+      for (const { id, fullname } of chunk) {
+        result.push({ id, deleted: found.get(fullname) ?? true });
+      }
     }
-    return bare;
+    return result;
+  }
+
+  private fullname(value: string, kind: "t1" | "t3"): string {
+    const prefix = `${kind}_`;
+    const bare = value.startsWith(prefix) ? value.slice(prefix.length) : value;
+    if (
+      bare.length > MAX_BARE_FULLNAME_LENGTH ||
+      !/^[A-Za-z0-9]+$/.test(bare)
+    ) {
+      throw new TypeError(`Invalid Reddit ${kind === "t3" ? "post" : "comment"} id`);
+    }
+    return `${prefix}${bare}`;
+  }
+
+  private barePostId(value: string): string {
+    return this.fullname(value, "t3").slice(3);
   }
 
   private rethrowTyped(error: unknown): void {
