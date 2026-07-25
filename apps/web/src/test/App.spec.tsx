@@ -22,6 +22,17 @@ const draftCard = {
   titleEn: "Octopuses use tools",
   redditUrl: "https://reddit.example.test/post",
   sourceUrl: "https://source.example.test/article",
+  candidateScore: 87.5,
+  selectionReasons: ["讨论热度高", "来源新鲜"],
+  commentLinks: [
+    "https://reddit.example.test/comment/high-score",
+    "https://reddit.example.test/comment/context",
+  ],
+  warnings: [{
+    code: "reddit_rate_limited",
+    message: "评论采集受限，摘要使用了已保留的评论。",
+  }],
+  runLocalDate: "2026-07-24",
 };
 
 function card(overrides: Partial<typeof draftCard> = {}) {
@@ -38,7 +49,7 @@ function installApiMock(runStatus: "running" | "partial" | "completed" = "partia
     if (url.endsWith("/api/runs/latest")) {
       return response({ run: {
         id: "run-1", localDate: "2026-07-24", status: runStatus,
-        discoveredCount: 20, selectedCount: 5, summarizedCount: 3,
+        discoveredCount: 20, selectedCount: 5, summarizedCount: 3, failedCount: 2,
         errorCode: "reddit_rate_limited", errorMessage: "Collector paused", startedAt: "2026-07-24T00:00:00.000Z", finishedAt: null,
       } });
     }
@@ -95,6 +106,17 @@ describe("App", () => {
     expect(screen.getByText("Collector paused")).toBeInTheDocument();
   });
 
+  it("shows failed count, candidate score, and selection reasons", async () => {
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    const runStatus = await screen.findByRole("region", { name: /2026-07-24/ });
+    expect(within(runStatus).getByText("2")).toBeInTheDocument();
+    const draft = screen.getByRole("article");
+    expect(within(draft).getByText("候选分：87.5")).toBeInTheDocument();
+    expect(within(draft).getByText("讨论热度高")).toBeInTheDocument();
+    expect(within(draft).getByText("来源新鲜")).toBeInTheDocument();
+  });
+
   it("approves a draft and removes it from the draft list", async () => {
     render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
 
@@ -113,6 +135,118 @@ describe("App", () => {
     expect(screen.getByText("仅根据原帖与有限评论整理。")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Reddit 原帖" })).toHaveAttribute("rel", "noreferrer noopener");
     expect(screen.getByRole("link", { name: "外部来源" })).toHaveAttribute("rel", "noreferrer noopener");
+  });
+
+  it("shows participating comment links and run warnings in detail", async () => {
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "查看 一只好奇的章鱼" }));
+
+    const detail = await screen.findByRole("region", { name: "一只好奇的章鱼" });
+    expect(within(detail).getByText("评论采集受限，摘要使用了已保留的评论。")).toBeInTheDocument();
+    const commentLinks = within(detail).getAllByRole("link", { name: /参与评论/ });
+    expect(commentLinks.map((link) => link.getAttribute("href"))).toEqual([
+      "https://reddit.example.test/comment/high-score",
+      "https://reddit.example.test/comment/context",
+    ]);
+    for (const link of commentLinks) {
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link).toHaveAttribute("rel", "noreferrer noopener");
+    }
+  });
+
+  it("loads today drafts using the latest run local date", async () => {
+    let resolveLatest!: (value: Response) => void;
+    const latest = new Promise<Response>((resolve) => { resolveLatest = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) return latest;
+      if (url === "https://api.example.test/api/cards?status=draft&date=2026-07-24") {
+        return response({ cards: [draftCard] });
+      }
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    resolveLatest(response({ run: {
+      id: "run-1",
+      localDate: "2026-07-24",
+      status: "completed",
+      discoveredCount: 1,
+      selectedCount: 1,
+      summarizedCount: 1,
+      failedCount: 0,
+      errorCode: null,
+      errorMessage: null,
+      startedAt: "2026-07-24T00:00:00.000Z",
+      finishedAt: "2026-07-24T00:01:00.000Z",
+    } }));
+
+    expect(await screen.findByText(draftCard.titleZh)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://api.example.test/api/cards?status=draft&date=2026-07-24",
+      expect.anything(),
+    );
+  });
+
+  it("filters approved and rejected history by the selected date", async () => {
+    const approved = card({
+      id: "approved-card",
+      status: "approved",
+      titleZh: "指定日期批准的卡片",
+      runLocalDate: "2026-07-20",
+    });
+    const rejected = card({
+      id: "rejected-card",
+      status: "rejected",
+      titleZh: "指定日期淘汰的卡片",
+      runLocalDate: "2026-07-20",
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) return response({ run: {
+        id: "run-1",
+        localDate: "2026-07-24",
+        status: "completed",
+        discoveredCount: 1,
+        selectedCount: 1,
+        summarizedCount: 1,
+        failedCount: 0,
+        errorCode: null,
+        errorMessage: null,
+        startedAt: "2026-07-24T00:00:00.000Z",
+        finishedAt: "2026-07-24T00:01:00.000Z",
+      } });
+      if (url.includes("status=draft")) return response({ cards: [draftCard] });
+      if (url === "https://api.example.test/api/cards?status=approved&date=2026-07-20") {
+        return response({ cards: [approved] });
+      }
+      if (url === "https://api.example.test/api/cards?status=rejected&date=2026-07-20") {
+        return response({ cards: [rejected] });
+      }
+      if (url.includes("status=approved") || url.includes("status=rejected")) {
+        return response({ cards: [] });
+      }
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "已批准" }));
+    const date = screen.getByLabelText("历史日期");
+    expect(date).toHaveAttribute("type", "date");
+    fireEvent.change(date, { target: { value: "2026-07-20" } });
+    expect(await screen.findByText("指定日期批准的卡片")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "已淘汰" }));
+    expect(await screen.findByText("指定日期淘汰的卡片")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/api/cards?status=rejected&date=2026-07-20",
+      expect.anything(),
+    );
   });
 
   it("disables manual run while a run is active", async () => {
@@ -298,6 +432,55 @@ describe("App", () => {
     resolveTerminalCards(response({ cards: [terminalDraft] }));
     await act(async () => { await Promise.resolve(); });
     expect(screen.getByText("终态刷新后的草稿")).toBeInTheDocument();
+  });
+
+  it("does not let delayed initial drafts overwrite a terminal refresh", async () => {
+    vi.useFakeTimers();
+    const staleDraft = card({ id: "initial-stale", titleZh: "运行结束前的旧草稿" });
+    const terminalDraft = card({ id: "terminal-fresh", titleZh: "运行结束后的新草稿" });
+    let latestCalls = 0;
+    let draftCalls = 0;
+    let resolveInitialDrafts!: (value: Response) => void;
+    const initialDrafts = new Promise<Response>((resolve) => { resolveInitialDrafts = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) {
+        latestCalls += 1;
+        const status = latestCalls === 1 ? "running" : "completed";
+        return response({ run: {
+          id: "run-1",
+          localDate: "2026-07-24",
+          status,
+          discoveredCount: 1,
+          selectedCount: 1,
+          summarizedCount: status === "completed" ? 1 : 0,
+          failedCount: 0,
+          errorCode: null,
+          errorMessage: null,
+          startedAt: "2026-07-24T00:00:00.000Z",
+          finishedAt: status === "completed" ? "2026-07-24T00:01:00.000Z" : null,
+        } });
+      }
+      if (url.includes("/api/cards?status=draft")) {
+        draftCalls += 1;
+        return draftCalls === 1
+          ? initialDrafts
+          : response({ cards: [terminalDraft] });
+      }
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(draftCalls).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(screen.getByText("运行结束后的新草稿")).toBeInTheDocument();
+
+    resolveInitialDrafts(response({ cards: [staleDraft] }));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText("运行结束后的新草稿")).toBeInTheDocument();
+    expect(screen.queryByText("运行结束前的旧草稿")).not.toBeInTheDocument();
   });
 
   it("does not let a delayed terminal refresh overwrite a newer tab", async () => {

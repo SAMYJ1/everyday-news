@@ -20,6 +20,7 @@ interface FetchRunRow {
   discovered_count: number;
   selected_count: number;
   summarized_count: number;
+  failed_count: number;
   error_code: string | null;
   error_message: string | null;
   started_at: string;
@@ -44,6 +45,11 @@ interface SummaryRow {
   title_en: string | null;
   reddit_url: string;
   source_url: string | null;
+  candidate_score: number;
+  selection_reasons: string;
+  comment_links: string;
+  warnings: string;
+  run_local_date: string;
 }
 
 interface AnonymousCollectionRow {
@@ -86,6 +92,7 @@ function toFetchRun(row: FetchRunRow): FetchRun {
     discoveredCount: row.discovered_count,
     selectedCount: row.selected_count,
     summarizedCount: row.summarized_count,
+    failedCount: row.failed_count,
     errorCode: row.error_code,
     errorMessage: row.error_message,
     startedAt: row.started_at,
@@ -111,7 +118,12 @@ function toSummary(row: SummaryRow): KnowledgeCard {
     reviewedAt: row.reviewed_at,
     titleEn: row.title_en,
     redditUrl: row.reddit_url,
-    sourceUrl: row.source_url
+    sourceUrl: row.source_url,
+    candidateScore: row.candidate_score,
+    selectionReasons: JSON.parse(row.selection_reasons) as string[],
+    commentLinks: JSON.parse(row.comment_links) as string[],
+    warnings: JSON.parse(row.warnings) as Array<{ code: string; message: string }>,
+    runLocalDate: row.run_local_date,
   };
 }
 
@@ -154,6 +166,9 @@ export class Repository {
     const row = await this.db
       .prepare(
         `SELECT id, local_date, status, discovered_count, selected_count, summarized_count,
+          (SELECT COUNT(*) FROM candidates
+            WHERE candidates.run_id = fetch_runs.id AND candidates.status = 'failed'
+          ) AS failed_count,
           error_code, error_message, started_at, finished_at
         FROM fetch_runs WHERE local_date = ?`,
       )
@@ -190,6 +205,7 @@ export class Repository {
       discoveredCount: 0,
       selectedCount: 0,
       summarizedCount: 0,
+      failedCount: 0,
       errorCode: null,
       errorMessage: null,
       startedAt: input.startedAt,
@@ -925,6 +941,9 @@ export class Repository {
     const row = await this.db
       .prepare(
         `SELECT id, local_date, status, discovered_count, selected_count, summarized_count,
+          (SELECT COUNT(*) FROM candidates
+            WHERE candidates.run_id = fetch_runs.id AND candidates.status = 'failed'
+          ) AS failed_count,
           error_code, error_message, started_at, finished_at
         FROM fetch_runs
         ORDER BY local_date DESC, started_at DESC
@@ -935,49 +954,84 @@ export class Repository {
     return row === null ? null : toFetchRun(row);
   }
 
-  async listCards(status?: SummaryStatus): Promise<KnowledgeCard[]> {
+  async listRuns(localDate?: string): Promise<FetchRun[]> {
+    const statement = localDate === undefined
+      ? this.db.prepare(
+          `SELECT id, local_date, status, discovered_count, selected_count, summarized_count,
+            (SELECT COUNT(*) FROM candidates
+              WHERE candidates.run_id = fetch_runs.id AND candidates.status = 'failed'
+            ) AS failed_count,
+            error_code, error_message, started_at, finished_at
+          FROM fetch_runs
+          ORDER BY local_date DESC, started_at DESC
+          LIMIT 30`,
+        )
+      : this.db.prepare(
+          `SELECT id, local_date, status, discovered_count, selected_count, summarized_count,
+            (SELECT COUNT(*) FROM candidates
+              WHERE candidates.run_id = fetch_runs.id AND candidates.status = 'failed'
+            ) AS failed_count,
+            error_code, error_message, started_at, finished_at
+          FROM fetch_runs
+          WHERE local_date = ?
+          ORDER BY local_date DESC, started_at DESC
+          LIMIT 30`,
+        ).bind(localDate);
+    const result = await statement.all<FetchRunRow>();
+    return result.results.map(toFetchRun);
+  }
+
+  async listCards(status?: SummaryStatus, localDate?: string): Promise<KnowledgeCard[]> {
     if (status === "source_deleted") return [];
-    const statement =
-      status === undefined
-        ? this.db.prepare(
-            `SELECT summaries.id, summaries.candidate_id, summaries.status, summaries.title_zh,
-              summaries.one_line_fact, summaries.why_interesting,
-              comment_insights, caveats, confidence_note, model, prompt_version,
-              input_hash, generated_at, reviewed_at, source_items.title AS title_en,
-              source_items.reddit_url, source_items.source_url
-            FROM summaries
-            JOIN candidates ON candidates.id = summaries.candidate_id
-            JOIN source_items ON source_items.id = candidates.item_id
-            WHERE summaries.status != 'source_deleted'
-              AND source_items.deleted_at IS NULL
-              AND NOT EXISTS (
-                SELECT 1 FROM source_comments
-                WHERE source_comments.item_id = source_items.id
-                  AND source_comments.deleted_at IS NOT NULL
-              )
-            ORDER BY summaries.generated_at DESC`
-          )
-        : this.db
-            .prepare(
-              `SELECT summaries.id, summaries.candidate_id, summaries.status, summaries.title_zh,
-                summaries.one_line_fact, summaries.why_interesting,
-                comment_insights, caveats, confidence_note, model, prompt_version,
-                input_hash, generated_at, reviewed_at, source_items.title AS title_en,
-                source_items.reddit_url, source_items.source_url
-              FROM summaries
-              JOIN candidates ON candidates.id = summaries.candidate_id
-              JOIN source_items ON source_items.id = candidates.item_id
-              WHERE summaries.status = ?
-                AND source_items.deleted_at IS NULL
-                AND NOT EXISTS (
-                  SELECT 1 FROM source_comments
-                  WHERE source_comments.item_id = source_items.id
-                    AND source_comments.deleted_at IS NOT NULL
-                )
-              ORDER BY summaries.generated_at DESC`
-            )
-            .bind(status);
-    const result = await statement.all<SummaryRow>();
+    const conditions = [
+      status === undefined ? "summaries.status != 'source_deleted'" : "summaries.status = ?",
+      "source_items.deleted_at IS NULL",
+      `NOT EXISTS (
+        SELECT 1 FROM source_comments
+        WHERE source_comments.item_id = source_items.id
+          AND source_comments.deleted_at IS NOT NULL
+      )`,
+    ];
+    const bindings: string[] = [];
+    if (status !== undefined) bindings.push(status);
+    if (localDate !== undefined) {
+      conditions.push("fetch_runs.local_date = ?");
+      bindings.push(localDate);
+    }
+    const statement = this.db.prepare(
+      `SELECT summaries.id, summaries.candidate_id, summaries.status, summaries.title_zh,
+        summaries.one_line_fact, summaries.why_interesting,
+        comment_insights, caveats, confidence_note, model, prompt_version,
+        input_hash, generated_at, reviewed_at, source_items.title AS title_en,
+        source_items.reddit_url, source_items.source_url,
+        candidates.score AS candidate_score, candidates.reasons AS selection_reasons,
+        COALESCE((
+          SELECT json_group_array(ordered_comments.reddit_url)
+          FROM (
+            SELECT source_comments.reddit_url
+            FROM source_comments
+            WHERE source_comments.item_id = source_items.id
+              AND source_comments.deleted_at IS NULL
+            ORDER BY source_comments.score DESC, source_comments.id ASC
+          ) AS ordered_comments
+        ), '[]') AS comment_links,
+        CASE
+          WHEN fetch_runs.error_code IS NOT NULL AND fetch_runs.error_message IS NOT NULL
+          THEN json_array(json_object(
+            'code', fetch_runs.error_code,
+            'message', fetch_runs.error_message
+          ))
+          ELSE '[]'
+        END AS warnings,
+        fetch_runs.local_date AS run_local_date
+      FROM summaries
+      JOIN candidates ON candidates.id = summaries.candidate_id
+      JOIN source_items ON source_items.id = candidates.item_id
+      JOIN fetch_runs ON fetch_runs.id = candidates.run_id
+      WHERE ${conditions.join("\n        AND ")}
+      ORDER BY summaries.generated_at DESC`,
+    );
+    const result = await (bindings.length === 0 ? statement : statement.bind(...bindings)).all<SummaryRow>();
 
     return result.results.map(toSummary);
   }
@@ -989,10 +1043,31 @@ export class Repository {
           summaries.one_line_fact, summaries.why_interesting,
           comment_insights, caveats, confidence_note, model, prompt_version,
           input_hash, generated_at, reviewed_at, source_items.title AS title_en,
-          source_items.reddit_url, source_items.source_url
+          source_items.reddit_url, source_items.source_url,
+          candidates.score AS candidate_score, candidates.reasons AS selection_reasons,
+          COALESCE((
+            SELECT json_group_array(ordered_comments.reddit_url)
+            FROM (
+              SELECT source_comments.reddit_url
+              FROM source_comments
+              WHERE source_comments.item_id = source_items.id
+                AND source_comments.deleted_at IS NULL
+              ORDER BY source_comments.score DESC, source_comments.id ASC
+            ) AS ordered_comments
+          ), '[]') AS comment_links,
+          CASE
+            WHEN fetch_runs.error_code IS NOT NULL AND fetch_runs.error_message IS NOT NULL
+            THEN json_array(json_object(
+              'code', fetch_runs.error_code,
+              'message', fetch_runs.error_message
+            ))
+            ELSE '[]'
+          END AS warnings,
+          fetch_runs.local_date AS run_local_date
         FROM summaries
         JOIN candidates ON candidates.id = summaries.candidate_id
         JOIN source_items ON source_items.id = candidates.item_id
+        JOIN fetch_runs ON fetch_runs.id = candidates.run_id
         WHERE summaries.id = ? AND summaries.status != 'source_deleted'
           AND source_items.deleted_at IS NULL
           AND NOT EXISTS (

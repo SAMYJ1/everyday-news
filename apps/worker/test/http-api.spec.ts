@@ -118,6 +118,7 @@ describe("protected HTTP API", () => {
 
     for (const [path, init] of [
       ["/api/runs/latest", {}],
+      ["/api/runs", {}],
       ["/api/cards?status=draft", {}],
       ["/api/cards/summary-1", {}],
       ["/api/cards/summary-1/approve", { method: "POST" }],
@@ -152,6 +153,82 @@ describe("protected HTTP API", () => {
     });
     expect(foreignPreflight.status).toBe(403);
     expect(await foreignPreflight.json()).toEqual({ error: { code: "forbidden_origin", message: "Forbidden origin" } });
+  });
+
+  it("lists runs and cards for an exact Shanghai local date", async () => {
+    const first = await seedCard(repository);
+    await repository.createRun({
+      id: "run-2",
+      localDate: "2026-07-25",
+      startedAt: "2026-07-25T00:00:00.000Z",
+    });
+    const secondItem = item("t3_post2");
+    const secondCandidate = candidate("run-2", secondItem.id);
+    await repository.upsertSourceItem(secondItem);
+    await repository.saveCandidate(secondCandidate);
+    await repository.saveSummary(card(secondCandidate.id));
+    await repository.setCandidateStatus(first.candidateId, "failed");
+
+    const runResponse = await request("/api/runs?date=2026-07-24", {
+      headers: authorizedHeaders(),
+    });
+    expect(runResponse.status).toBe(200);
+    expect(await runResponse.json()).toEqual({
+      runs: [expect.objectContaining({
+        id: "run-1",
+        localDate: "2026-07-24",
+        failedCount: 1,
+      })],
+    });
+
+    const cardResponse = await request("/api/cards?status=draft&date=2026-07-25", {
+      headers: authorizedHeaders(),
+    });
+    expect(cardResponse.status).toBe(200);
+    expect(await cardResponse.json()).toEqual({
+      cards: [expect.objectContaining({
+        candidateId: secondCandidate.id,
+        candidateScore: 100,
+        selectionReasons: ["popular"],
+        runLocalDate: "2026-07-25",
+      })],
+    });
+  });
+
+  it("returns the newest 30 runs when no date is supplied", async () => {
+    for (let day = 1; day <= 31; day += 1) {
+      const localDate = `2026-07-${String(day).padStart(2, "0")}`;
+      await repository.createRun({
+        id: `run-${day}`,
+        localDate,
+        startedAt: `${localDate}T00:00:00.000Z`,
+      });
+    }
+
+    const response = await request("/api/runs", { headers: authorizedHeaders() });
+    const body = await response.json() as { runs: Array<{ id: string }> };
+
+    expect(response.status).toBe(200);
+    expect(body.runs).toHaveLength(30);
+    expect(body.runs[0].id).toBe("run-31");
+    expect(body.runs.at(-1)?.id).toBe("run-2");
+  });
+
+  it("rejects malformed or impossible date filters with the JSON error envelope", async () => {
+    for (const path of [
+      "/api/runs?date=2026-7-24",
+      "/api/runs?date=2026-02-30",
+      "/api/cards?status=draft&date=2026-07-24T00%3A00%3A00Z",
+    ]) {
+      const response = await request(path, { headers: authorizedHeaders() });
+      expect(response.status, path).toBe(400);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "invalid_date",
+          message: "Date must be a valid YYYY-MM-DD",
+        },
+      });
+    }
   });
 
   it("approves a card once and leaves a repeated approval idempotent", async () => {

@@ -55,6 +55,16 @@ function cardId(pathname: string, action?: string): string | null {
   return match === null ? null : decodeURIComponent(match[1]);
 }
 
+function isValidLocalDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (match === null) return false;
+  const [, year, month, day] = match;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  return date.getUTCFullYear() === Number(year) &&
+    date.getUTCMonth() === Number(month) - 1 &&
+    date.getUTCDate() === Number(day);
+}
+
 export async function routeRequest(request: Request, deps: RouterDeps): Promise<Response> {
   const { env, repository } = deps;
   const url = new URL(request.url);
@@ -82,12 +92,29 @@ export async function routeRequest(request: Request, deps: RouterDeps): Promise<
       return json(request, env, { run: await repository.getLatestRun() });
     }
 
+    if (request.method === "GET" && url.pathname === "/api/runs") {
+      const date = url.searchParams.get("date");
+      if (date !== null && !isValidLocalDate(date)) {
+        return error(request, env, 400, "invalid_date", "Date must be a valid YYYY-MM-DD");
+      }
+      return json(request, env, { runs: await repository.listRuns(date ?? undefined) });
+    }
+
     if (request.method === "GET" && url.pathname === "/api/cards") {
       const requestedStatus = url.searchParams.get("status");
+      const date = url.searchParams.get("date");
       if (requestedStatus !== null && !LISTABLE_CARD_STATUSES.has(requestedStatus as SummaryStatus)) {
         return error(request, env, 400, "invalid_status", "Invalid card status");
       }
-      return json(request, env, { cards: await repository.listCards(requestedStatus as SummaryStatus | undefined) });
+      if (date !== null && !isValidLocalDate(date)) {
+        return error(request, env, 400, "invalid_date", "Date must be a valid YYYY-MM-DD");
+      }
+      return json(request, env, {
+        cards: await repository.listCards(
+          requestedStatus as SummaryStatus | undefined,
+          date ?? undefined,
+        ),
+      });
     }
 
     const getId = cardId(url.pathname);

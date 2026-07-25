@@ -38,6 +38,7 @@ export function RunStatus({ run, isStarting, onStart, onEnableAnonymous, isEnabl
             ["发现", run.discoveredCount],
             ["入选", run.selectedCount],
             ["已生成", run.summarizedCount],
+            ["失败", run.failedCount],
           ].map(([label, count]) => <div key={label}>
             <dt>{label}</dt><dd>{count}</dd>
             <span className="visually-hidden" aria-hidden="true">{label} {count}</span>

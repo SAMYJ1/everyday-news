@@ -17,6 +17,10 @@ export function DraftCard({ card, busy, onApprove, onReject, onRegenerate, onVie
       <p className="eyebrow">{statusLabel}</p>
       <h3>{card.titleZh}</h3>
       <p className="card-fact">{card.oneLineFact}</p>
+      <p>候选分：{card.candidateScore}</p>
+      <ul aria-label="选择原因">
+        {card.selectionReasons.map((reason) => <li key={reason}>{reason}</li>)}
+      </ul>
       <p className="card-source">{sourceHost ?? (card.sourceUrl ? "来源地址无效" : "未提供外部来源")}</p>
       <div className="card-actions">
         {card.status === "draft" && <>

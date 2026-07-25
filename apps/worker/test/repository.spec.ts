@@ -1,6 +1,6 @@
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Candidate, KnowledgeCardRecord, SourceItem } from "../src/domain";
+import type { Candidate, KnowledgeCardRecord, SourceComment, SourceItem } from "../src/domain";
 import { Repository } from "../src/db/repository";
 import { applyMigrations } from "./apply-migrations";
 
@@ -56,6 +56,25 @@ function summary(overrides: Partial<KnowledgeCardRecord> = {}): KnowledgeCardRec
     inputHash: "sha256:test",
     generatedAt: now,
     ...overrides
+  };
+}
+
+function sourceComment(overrides: Partial<SourceComment> = {}): SourceComment {
+  return {
+    id: "comment-1",
+    itemId: "item-1",
+    externalId: "t1_comment1",
+    parentExternalId: "t3_abc",
+    author: "commenter",
+    body: "A useful comment.",
+    score: 3,
+    depth: 0,
+    redditUrl: "https://reddit.com/comment-1",
+    publishedAt: now,
+    fetchedAt: now,
+    deletedAt: null,
+    deleted: false,
+    ...overrides,
   };
 }
 
@@ -179,6 +198,40 @@ describe("Repository", () => {
     ).rejects.toThrow();
   });
 
+  it("lists the newest runs with failed candidate counts and an exact local-date filter", async () => {
+    await repository.createRun({
+      id: "run-older",
+      localDate: "2026-07-22",
+      startedAt: "2026-07-22T00:00:00.000Z",
+    });
+    await repository.createRun({
+      id: "run-newer",
+      localDate: "2026-07-23",
+      startedAt: "2026-07-23T00:00:00.000Z",
+    });
+    await repository.upsertSourceItem(sourceItem());
+    await repository.saveCandidate(candidate({
+      id: "candidate-failed",
+      runId: "run-newer",
+      status: "failed",
+    }));
+
+    expect(await repository.getLatestRun()).toMatchObject({
+      id: "run-newer",
+      failedCount: 1,
+    });
+    expect((await repository.listRuns()).map((run) => ({
+      id: run.id,
+      failedCount: run.failedCount,
+    }))).toEqual([
+      { id: "run-newer", failedCount: 1 },
+      { id: "run-older", failedCount: 0 },
+    ]);
+    expect((await repository.listRuns("2026-07-22")).map((run) => run.id)).toEqual([
+      "run-older",
+    ]);
+  });
+
   it("moves a summary through draft, approved, and rejected states", async () => {
     await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
     await repository.upsertSourceItem(sourceItem());
@@ -226,6 +279,90 @@ describe("Repository", () => {
       redditUrl: "https://reddit.com/r/todayilearned/comments/abc",
       sourceUrl: "https://example.test/source"
     });
+  });
+
+  it("projects candidate context, ordered retained comments, run warnings, and run date", async () => {
+    await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
+    await env.DB
+      .prepare(
+        `UPDATE fetch_runs
+        SET status = 'partial', error_code = ?, error_message = ?
+        WHERE id = ?`,
+      )
+      .bind("reddit_rate_limited", "Reddit asked the collector to slow down.", "run-1")
+      .run();
+    await repository.upsertSourceItem(sourceItem());
+    await repository.replaceComments("item-1", [
+      sourceComment({
+        id: "comment-low",
+        externalId: "t1_low",
+        score: 3,
+        redditUrl: "https://reddit.com/comment-low",
+      }),
+      sourceComment({
+        id: "comment-z",
+        externalId: "t1_z",
+        score: 9,
+        redditUrl: "https://reddit.com/comment-z",
+      }),
+      sourceComment({
+        id: "comment-a",
+        externalId: "t1_a",
+        score: 9,
+        redditUrl: "https://reddit.com/comment-a",
+      }),
+    ]);
+    await repository.saveCandidate(candidate({
+      score: 87.5,
+      reasons: ["high discussion", "fresh source"],
+    }));
+    await repository.saveSummary(summary());
+
+    expect(await repository.listCards("draft", "2026-07-23")).toEqual([
+      expect.objectContaining({
+        id: "summary-1",
+        candidateScore: 87.5,
+        selectionReasons: ["high discussion", "fresh source"],
+        commentLinks: [
+          "https://reddit.com/comment-a",
+          "https://reddit.com/comment-z",
+          "https://reddit.com/comment-low",
+        ],
+        warnings: [{
+          code: "reddit_rate_limited",
+          message: "Reddit asked the collector to slow down.",
+        }],
+        runLocalDate: "2026-07-23",
+      }),
+    ]);
+    expect(await repository.listCards("draft", "2026-07-22")).toEqual([]);
+    expect(await repository.getCard("summary-1")).toMatchObject({
+      candidateScore: 87.5,
+      selectionReasons: ["high discussion", "fresh source"],
+      commentLinks: [
+        "https://reddit.com/comment-a",
+        "https://reddit.com/comment-z",
+        "https://reddit.com/comment-low",
+      ],
+      warnings: [{
+        code: "reddit_rate_limited",
+        message: "Reddit asked the collector to slow down.",
+      }],
+      runLocalDate: "2026-07-23",
+    });
+  });
+
+  it("omits incomplete run warnings from cards", async () => {
+    await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
+    await env.DB
+      .prepare("UPDATE fetch_runs SET error_code = ?, error_message = NULL WHERE id = ?")
+      .bind("incomplete_warning", "run-1")
+      .run();
+    await repository.upsertSourceItem(sourceItem());
+    await repository.saveCandidate(candidate());
+    await repository.saveSummary(summary());
+
+    expect(await repository.getCard("summary-1")).toMatchObject({ warnings: [] });
   });
 
   it("stores prompt version and input hash", async () => {

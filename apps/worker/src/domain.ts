@@ -16,6 +16,7 @@ export interface FetchRun {
   discoveredCount: number;
   selectedCount: number;
   summarizedCount: number;
+  failedCount: number;
   errorCode: string | null;
   errorMessage: string | null;
   startedAt: string;
@@ -90,6 +91,11 @@ export interface KnowledgeCard extends KnowledgeCardRecord {
   titleEn: string | null;
   redditUrl: string;
   sourceUrl: string | null;
+  candidateScore: number;
+  selectionReasons: string[];
+  commentLinks: string[];
+  warnings: Array<{ code: string; message: string }>;
+  runLocalDate: string;
 }
 
 export interface AnonymousCollection {

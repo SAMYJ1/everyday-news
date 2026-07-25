@@ -8,6 +8,7 @@ export interface FetchRun {
   discoveredCount: number;
   selectedCount: number;
   summarizedCount: number;
+  failedCount: number;
   errorCode: string | null;
   errorMessage: string | null;
   startedAt: string;
@@ -32,6 +33,11 @@ export interface KnowledgeCard {
   titleEn: string | null;
   redditUrl: string;
   sourceUrl: string | null;
+  candidateScore: number;
+  selectionReasons: string[];
+  commentLinks: string[];
+  warnings: Array<{ code: string; message: string }>;
+  runLocalDate: string;
 }
 
 export interface AnonymousCollection {
@@ -74,7 +80,15 @@ export function createApiClient(baseUrl: string, getAdminKey: () => string) {
 
   return {
     getLatestRun: async (init?: RequestInit) => (await request<{ run: FetchRun | null }>("/api/runs/latest", init)).run,
-    listCards: async (status: CardStatus, init?: RequestInit) => (await request<{ cards: KnowledgeCard[] }>(`/api/cards?status=${status}`, init)).cards,
+    listCards: async (status: CardStatus, dateOrInit?: string | RequestInit, requestInit?: RequestInit) => {
+      const date = typeof dateOrInit === "string" ? dateOrInit : undefined;
+      const init = typeof dateOrInit === "string" ? requestInit : dateOrInit;
+      const dateQuery = date === undefined ? "" : `&date=${encodeURIComponent(date)}`;
+      return (await request<{ cards: KnowledgeCard[] }>(
+        `/api/cards?status=${encodeURIComponent(status)}${dateQuery}`,
+        init,
+      )).cards;
+    },
     getCard: async (id: string, init?: RequestInit) => (await request<{ card: KnowledgeCard }>(`/api/cards/${encodeURIComponent(id)}`, init)).card,
     approve: async (id: string) => (await request<{ card: KnowledgeCard }>(`/api/cards/${encodeURIComponent(id)}/approve`, { method: "POST" })).card,
     reject: async (id: string) => (await request<{ card: KnowledgeCard }>(`/api/cards/${encodeURIComponent(id)}/reject`, { method: "POST" })).card,
