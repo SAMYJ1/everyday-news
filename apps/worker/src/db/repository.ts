@@ -441,6 +441,74 @@ export class Repository {
     };
   }
 
+  async listSourceItemsForCleanup(input: {
+    recentSince: string;
+    dailyBefore: string;
+    weeklyBefore: string;
+  }): Promise<Array<{ id: string; externalId: string }>> {
+    const result = await this.db
+      .prepare(
+        `SELECT id, external_id
+        FROM source_items
+        WHERE deleted_at IS NULL AND (
+          (fetched_at >= ? AND last_checked_at <= ?)
+          OR (fetched_at < ? AND last_checked_at <= ?)
+        )
+        ORDER BY external_id ASC`,
+      )
+      .bind(
+        input.recentSince,
+        input.dailyBefore,
+        input.recentSince,
+        input.weeklyBefore,
+      )
+      .all<{ id: string; external_id: string }>();
+    return result.results.map((row) => ({
+      id: row.id,
+      externalId: row.external_id,
+    }));
+  }
+
+  async markSourceItemChecked(itemId: string, checkedAt: string): Promise<void> {
+    await this.db
+      .prepare(
+        "UPDATE source_items SET last_checked_at = ? WHERE id = ? AND deleted_at IS NULL",
+      )
+      .bind(checkedAt, itemId)
+      .run();
+  }
+
+  async removeDeletedSourceItem(itemId: string, deletedAt: string): Promise<void> {
+    await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE source_items
+          SET deleted_at = ?, last_checked_at = ?
+          WHERE id = ? AND deleted_at IS NULL`,
+        )
+        .bind(deletedAt, deletedAt, itemId),
+      this.db
+        .prepare(
+          "UPDATE source_items SET title = NULL, author = NULL, source_url = NULL WHERE id = ?",
+        )
+        .bind(itemId),
+      this.db
+        .prepare(
+          `UPDATE source_comments
+          SET body = '', author = NULL, deleted_at = COALESCE(deleted_at, ?)
+          WHERE item_id = ?`,
+        )
+        .bind(deletedAt, itemId),
+      this.db
+        .prepare(
+          `UPDATE summaries
+          SET status = 'source_deleted'
+          WHERE candidate_id IN (SELECT id FROM candidates WHERE item_id = ?)`,
+        )
+        .bind(itemId),
+    ]);
+  }
+
   async listComments(itemId: string): Promise<SourceComment[]> {
     const result = await this.db
       .prepare(
@@ -768,6 +836,7 @@ export class Repository {
   }
 
   async listCards(status?: SummaryStatus): Promise<KnowledgeCard[]> {
+    if (status === "source_deleted") return [];
     const statement =
       status === undefined
         ? this.db.prepare(
@@ -923,6 +992,19 @@ export class Repository {
       .run();
 
     return this.getAnonymousCollection();
+  }
+
+  async recordAnonymousSuccess(at: string): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO settings (key, enabled, consecutive_failures, updated_at)
+        VALUES (?, 1, 0, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          consecutive_failures = 0,
+          updated_at = excluded.updated_at`,
+      )
+      .bind(ANONYMOUS_COLLECTION_KEY, at)
+      .run();
   }
 
   async getAnonymousCollection(): Promise<AnonymousCollection> {

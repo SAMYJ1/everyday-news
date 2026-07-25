@@ -29,6 +29,9 @@ export interface PipelineDeps {
     | "getPendingCardRegeneration"
     | "completeCardRegeneration"
     | "getActiveCardRegeneration"
+    | "listSourceItemsForCleanup"
+    | "markSourceItemChecked"
+    | "removeDeletedSourceItem"
   >;
   now?: () => Date;
 }

@@ -6,7 +6,6 @@ import type { Candidate, SourceComment, SourceItem } from "../src/domain";
 import { createWorker } from "../src/index";
 import {
   RedditAccessDenied,
-  RedditRateLimited,
   RedditTemporaryFailure,
   RedditUnexpectedResponse,
 } from "../src/reddit/anonymous-json";
@@ -372,7 +371,6 @@ describe("pipeline orchestration", () => {
   });
 
   it.each([
-    new RedditRateLimited(30),
     new RedditTemporaryFailure("Reddit unavailable"),
     new WorkersAiTemporaryFailure("AI unavailable"),
   ])("retries typed temporary failures", async (failure) => {
@@ -387,7 +385,10 @@ describe("pipeline orchestration", () => {
     expect(queued.ack).not.toHaveBeenCalled();
   });
 
-  it.each([401, 403])("fails and acknowledges Reddit %i access denial so it is not retried", async (status) => {
+  it.each([
+    [401, "unauthorized"],
+    [403, "forbidden"],
+  ] as const)("fails and acknowledges Reddit %i access denial so it is not retried", async (status, errorCode) => {
     const pipeline = queue();
     const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
     const worker = createWorker({ reddit: reddit({ listTopPosts: async () => { throw new RedditAccessDenied(status); } }), now: () => now });
@@ -397,7 +398,7 @@ describe("pipeline orchestration", () => {
 
     expect(queued.ack).toHaveBeenCalledOnce();
     expect(queued.retry).not.toHaveBeenCalled();
-    expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({ status: "failed", errorCode: "reddit_access_denied" });
+    expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({ status: "failed", errorCode });
   });
 
   it("acknowledges access denial even when persisting the failed run throws", async () => {

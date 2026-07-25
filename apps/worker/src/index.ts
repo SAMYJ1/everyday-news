@@ -3,13 +3,20 @@ import { Repository } from "./db/repository";
 import type { Env, PipelineMessage } from "./env";
 import { routeRequest } from "./http/router";
 import { collectComments } from "./pipeline/comments";
+import { recordAccessFailure, syncSourceState, type AccessFailureCode } from "./pipeline/cleanup";
 import { discoverCandidates, type PipelineDeps } from "./pipeline/discover";
 import {
   SUMMARY_CLAIM_LEASE_MS,
   SummaryClaimUnavailable,
   summarizeCandidate,
 } from "./pipeline/summarize";
-import { AnonymousJsonRedditAdapter, RedditAccessDenied, RedditRateLimited, RedditTemporaryFailure } from "./reddit/anonymous-json";
+import {
+  AnonymousJsonRedditAdapter,
+  RedditAccessDenied,
+  RedditChallenge,
+  RedditRateLimited,
+  RedditTemporaryFailure,
+} from "./reddit/anonymous-json";
 import type { RedditSourceAdapter } from "./reddit/adapter";
 import type { CardGenerator } from "./ai/workers-ai";
 
@@ -42,10 +49,18 @@ function shanghaiLocalDate(now: Date): string {
 }
 
 function isTemporaryFailure(error: unknown): boolean {
-  return error instanceof RedditRateLimited ||
-    error instanceof RedditTemporaryFailure ||
+  return error instanceof RedditTemporaryFailure ||
     error instanceof WorkersAiTemporaryFailure ||
     error instanceof PipelineTemporaryFailure;
+}
+
+function accessFailureCode(error: unknown): AccessFailureCode | null {
+  if (error instanceof RedditAccessDenied) {
+    return error.status === 401 ? "unauthorized" : "forbidden";
+  }
+  if (error instanceof RedditRateLimited) return "rate_limited";
+  if (error instanceof RedditChallenge) return "challenge";
+  return null;
 }
 
 function errorMessage(error: unknown): string {
@@ -142,8 +157,21 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
     try {
       switch (message.body.stage) {
         case "discover": {
+          const anonymous = await repository.getAnonymousCollection();
+          if (!anonymous.enabled) {
+            await repository.markRunFailed(
+              message.body.runId,
+              "anonymous_disabled",
+              "Anonymous Reddit collection is disabled",
+              current.toISOString(),
+            );
+            message.ack();
+            return;
+          }
           await repository.markRunRunning(message.body.runId);
+          await syncSourceState(deps, current);
           const result = await discoverCandidates(deps, message.body.runId);
+          await repository.recordAnonymousSuccess(current.toISOString());
           for (const itemId of result.itemIds) {
             await sendPipeline(
               env.PIPELINE,
@@ -209,22 +237,24 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         message.retry({ delaySeconds: SUMMARY_CLAIM_RETRY_DELAY_SECONDS });
         return;
       }
-      if (isTemporaryFailure(error)) {
-        message.retry();
-        return;
-      }
-      if (error instanceof RedditAccessDenied) {
+      const accessCode = accessFailureCode(error);
+      if (accessCode !== null) {
         try {
+          await recordAccessFailure(repository, accessCode, current.toISOString());
           await repository.markRunFailed(
             message.body.runId,
-            "reddit_access_denied",
-            error.message,
+            accessCode,
+            errorMessage(error),
             current.toISOString(),
           );
         } catch {
           // Access denial is terminal even when its failure record cannot be persisted.
         }
         message.ack();
+        return;
+      }
+      if (isTemporaryFailure(error)) {
+        message.retry();
         return;
       }
 

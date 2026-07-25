@@ -24,6 +24,13 @@ export class RedditUnexpectedResponse extends Error {
   }
 }
 
+export class RedditChallenge extends RedditUnexpectedResponse {
+  constructor() {
+    super("Reddit returned an HTML or non-JSON challenge response");
+    this.name = "RedditChallenge";
+  }
+}
+
 export class RedditTemporaryFailure extends Error {
   constructor(
     message: string,
@@ -177,9 +184,7 @@ export class AnonymousJsonRedditAdapter implements RedditSourceAdapter {
     }
     const contentType = response.headers.get("Content-Type") ?? "";
     if (!/(?:^|;)\s*application\/(?:[\w.+-]+\+)?json(?:\s*;|$)/i.test(contentType)) {
-      throw new RedditUnexpectedResponse(
-        `Unexpected Reddit content type: ${contentType || "(missing)"}`,
-      );
+      throw new RedditChallenge();
     }
     try {
       return await response.json();
