@@ -1,6 +1,7 @@
 import { WorkersAiCardGenerator, WorkersAiTemporaryFailure } from "./ai/workers-ai";
 import { Repository } from "./db/repository";
 import type { Env, PipelineMessage } from "./env";
+import { routeRequest } from "./http/router";
 import { collectComments } from "./pipeline/comments";
 import { discoverCandidates, type PipelineDeps } from "./pipeline/discover";
 import {
@@ -228,12 +229,22 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
   }
 
   return {
-    fetch(request) {
-      if (new URL(request.url).pathname === "/api/health") {
-        return Response.json({ ok: true, service: "everyday-news-api", version: 1 });
-      }
-
-      return new Response("Not Found", { status: 404 });
+    async fetch(request, env) {
+      return routeRequest(request, {
+        env,
+        repository: new Repository(env.DB),
+        now: clock(),
+        startManualRun: () => {
+          const now = clock();
+          return startRun(
+            new Repository(env.DB),
+            env.PIPELINE,
+            shanghaiLocalDate(now),
+            "manual",
+            now,
+          );
+        },
+      });
     },
     async scheduled(_event, env, _ctx) {
       const now = clock();

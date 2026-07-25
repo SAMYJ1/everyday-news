@@ -688,17 +688,18 @@ export class Repository {
     summaryId: string,
     action: "approve" | "reject",
     at: string
-  ): Promise<void> {
+  ): Promise<boolean> {
     const status: SummaryStatus = action === "approve" ? "approved" : "rejected";
-
-    await this.db.batch([
-      this.db
-        .prepare("UPDATE summaries SET status = ?, reviewed_at = ? WHERE id = ?")
-        .bind(status, at, summaryId),
-      this.db
-        .prepare("INSERT INTO review_actions (summary_id, action, created_at) VALUES (?, ?, ?)")
-        .bind(summaryId, action, at)
-    ]);
+    const result = await this.db
+      .prepare("UPDATE summaries SET status = ?, reviewed_at = ? WHERE id = ? AND status != ?")
+      .bind(status, at, summaryId, status)
+      .run();
+    if ((result.meta.changes ?? 0) === 0) return false;
+    await this.db
+      .prepare("INSERT INTO review_actions (summary_id, action, created_at) VALUES (?, ?, ?)")
+      .bind(summaryId, action, at)
+      .run();
+    return true;
   }
 
   async getRecentSourceUrls(days: number): Promise<Set<string>> {
@@ -780,6 +781,56 @@ export class Repository {
     const result = await statement.all<SummaryRow>();
 
     return result.results.map(toSummary);
+  }
+
+  async getCard(summaryId: string): Promise<KnowledgeCard | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT summaries.id, summaries.candidate_id, summaries.status, summaries.title_zh,
+          summaries.one_line_fact, summaries.why_interesting,
+          comment_insights, caveats, confidence_note, model, prompt_version,
+          input_hash, generated_at, reviewed_at, source_items.title AS title_en,
+          source_items.reddit_url, source_items.source_url
+        FROM summaries
+        JOIN candidates ON candidates.id = summaries.candidate_id
+        JOIN source_items ON source_items.id = candidates.item_id
+        WHERE summaries.id = ? AND summaries.status != 'source_deleted'`,
+      )
+      .bind(summaryId)
+      .first<SummaryRow>();
+    return row === null ? null : toSummary(row);
+  }
+
+  async requestCardRegeneration(
+    summaryId: string,
+    at: string,
+  ): Promise<{ runId: string; itemId: string } | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT candidates.id, candidates.run_id, candidates.item_id
+        FROM summaries
+        JOIN candidates ON candidates.id = summaries.candidate_id
+        WHERE summaries.id = ?`,
+      )
+      .bind(summaryId)
+      .first<{ id: string; run_id: string; item_id: string }>();
+    if (row === null) return null;
+
+    const result = await this.db
+      .prepare(
+        `UPDATE candidates
+        SET status = 'comments_ready', summary_claimed_at = NULL, summary_claim_token = NULL
+        WHERE id = ? AND status IN ('summarized', 'failed')`,
+      )
+      .bind(row.id)
+      .run();
+    if ((result.meta.changes ?? 0) === 0) return null;
+
+    await this.db
+      .prepare("INSERT INTO review_actions (summary_id, action, created_at) VALUES (?, 'regenerate', ?)")
+      .bind(summaryId, at)
+      .run();
+    return { runId: row.run_id, itemId: row.item_id };
   }
 
   async setAnonymousEnabled(enabled: boolean, at = new Date().toISOString()): Promise<void> {
