@@ -73,9 +73,9 @@ export function createApiClient(baseUrl: string, getAdminKey: () => string) {
   }
 
   return {
-    getLatestRun: async () => (await request<{ run: FetchRun | null }>("/api/runs/latest")).run,
-    listCards: async (status: CardStatus) => (await request<{ cards: KnowledgeCard[] }>(`/api/cards?status=${status}`)).cards,
-    getCard: async (id: string) => (await request<{ card: KnowledgeCard }>(`/api/cards/${encodeURIComponent(id)}`)).card,
+    getLatestRun: async (init?: RequestInit) => (await request<{ run: FetchRun | null }>("/api/runs/latest", init)).run,
+    listCards: async (status: CardStatus, init?: RequestInit) => (await request<{ cards: KnowledgeCard[] }>(`/api/cards?status=${status}`, init)).cards,
+    getCard: async (id: string, init?: RequestInit) => (await request<{ card: KnowledgeCard }>(`/api/cards/${encodeURIComponent(id)}`, init)).card,
     approve: async (id: string) => (await request<{ card: KnowledgeCard }>(`/api/cards/${encodeURIComponent(id)}/approve`, { method: "POST" })).card,
     reject: async (id: string) => (await request<{ card: KnowledgeCard }>(`/api/cards/${encodeURIComponent(id)}/reject`, { method: "POST" })).card,
     regenerate: async (id: string) => (await request<{ card: KnowledgeCard }>(`/api/cards/${encodeURIComponent(id)}/regenerate`, { method: "POST" })).card,

@@ -6,6 +6,7 @@ interface RunStatusProps {
   onStart: () => void;
   onEnableAnonymous: () => void;
   isEnablingAnonymous: boolean;
+  collectorEnabled?: boolean;
 }
 
 const statusLabels = {
@@ -16,9 +17,9 @@ const statusLabels = {
   failed: "失败",
 } as const;
 
-export function RunStatus({ run, isStarting, onStart, onEnableAnonymous, isEnablingAnonymous }: RunStatusProps) {
+export function RunStatus({ run, isStarting, onStart, onEnableAnonymous, isEnablingAnonymous, collectorEnabled }: RunStatusProps) {
   const isActive = run?.status === "queued" || run?.status === "running";
-  const collectorPaused = run?.errorCode === "anonymous_disabled";
+  const collectorPaused = collectorEnabled === undefined ? run?.errorCode === "anonymous_disabled" : !collectorEnabled;
 
   return (
     <section className="run-status" aria-labelledby="run-status-heading">
