@@ -4,6 +4,34 @@ Run every command from the repository root unless the command says otherwise.
 Use Node.js 22, and never paste secret values into a command line, a URL, a
 checked-in file, or a log.
 
+## GitHub Actions production setup
+
+The `Deploy` workflow is the only automated production deployment path. It
+runs after a push to `main` or from a deliberate manual dispatch. Pull
+requests run CI only and never receive production credentials.
+
+Before merging the deployment workflow, create a GitHub Environment named
+`production`. Add branch protection or required reviewers there if the
+repository requires an approval gate, then configure these repository
+secrets:
+
+- `CLOUDFLARE_API_TOKEN`: a least-privilege token with Workers Scripts, D1,
+  and Pages write access for the target account.
+- `CLOUDFLARE_ACCOUNT_ID`: the exact target Cloudflare account ID.
+- `CLOUDFLARE_D1_DATABASE_NAME`: `everyday-news`.
+- `CLOUDFLARE_PAGES_PROJECT`: `everyday-news`.
+- `WORKER_BASE_URL`: the deployed Worker origin, with no path or trailing
+  slash.
+- `PAGES_BASE_URL`: the production Pages origin, with no path or trailing
+  slash.
+
+`ADMIN_KEY`, `REDDIT_USER_AGENT`, and `APP_ORIGIN` remain Cloudflare Worker
+runtime secrets. Do not add them to the Web build or expose them as `VITE_*`
+variables.
+
+The workflow does not create Cloudflare resources. Complete the D1, Queue,
+Pages, and Worker-secret bootstrap below before the first production run.
+
 ## 1. Local verification
 
 Install exactly the locked dependencies and run the fixture-backed checks:
