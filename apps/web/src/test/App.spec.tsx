@@ -380,10 +380,26 @@ describe("App", () => {
   });
 
   it("disables manual run while a run is active", async () => {
-    vi.stubGlobal("fetch", installApiMock("running"));
+    let resolveLatest!: (value: Response) => void;
+    const latest = new Promise<Response>((resolve) => { resolveLatest = resolve; });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) return latest;
+      if (url.endsWith("/api/runs")) return response({ runs: [] });
+      if (url.includes("/api/cards?status=draft")) return response({ cards: [] });
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
     render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
 
-    expect(await screen.findByRole("button", { name: "手动运行" })).toBeDisabled();
+    const button = screen.getByRole("button", { name: "手动运行" });
+    expect(button).toBeEnabled();
+
+    resolveLatest(response({ run: runRecord({
+      status: "running",
+      finishedAt: null,
+    }) }));
+    await waitFor(() => expect(button).toBeDisabled());
   });
 
   it("clears a rejected access key and returns to the gate with an error", async () => {
