@@ -237,6 +237,78 @@ describe("pipeline orchestration", () => {
     expect(pipeline.send).toHaveBeenCalledTimes(2);
   });
 
+  it("recovers a comments_ready summarize delivery after a sibling fails the run", async () => {
+    let rejectDelivery = true;
+    const pipeline = queue(async () => {
+      if (rejectDelivery) throw new Error("queue unavailable");
+    });
+    const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
+    await repository.upsertSourceItem(item("t3_recover"));
+    await repository.upsertSourceItem(item("t3_denied"));
+    await repository.saveCandidate(candidate(run.id, "t3_recover", "comments_ready"));
+    await repository.saveCandidate({
+      ...candidate(run.id, "t3_denied"),
+      id: `${run.id}:t3_denied`,
+      itemId: "t3_denied",
+      rank: 2,
+    });
+    const redditAdapter = reddit({
+      getPostWithComments: async (itemId) => {
+        if (itemId === "t3_denied") throw new RedditAccessDenied(403);
+        return { item: item(itemId), comments: [comment(itemId)] };
+      },
+    });
+    const worker = createWorker({ reddit: redditAdapter, now: () => now });
+    const denied = message({ stage: "comments", runId: run.id, itemId: "t3_denied" });
+    await worker.queue?.(
+      { messages: [denied] } as MessageBatch<never>,
+      environment(pipeline) as never,
+      {} as ExecutionContext,
+    );
+    expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({
+      status: "failed",
+      errorCode: "forbidden",
+    });
+
+    pipeline.send.mockClear();
+    redditAdapter.getPostWithComments.mockClear();
+    const interruptedReplay = message({ stage: "comments", runId: run.id, itemId: "t3_recover" });
+    await worker.queue?.(
+      { messages: [interruptedReplay] } as MessageBatch<never>,
+      environment(pipeline) as never,
+      {} as ExecutionContext,
+    );
+
+    expect(redditAdapter.getPostWithComments).not.toHaveBeenCalled();
+    expect(pipeline.send).toHaveBeenCalledOnce();
+    expect(pipeline.send).toHaveBeenCalledWith({
+      stage: "summarize",
+      runId: run.id,
+      itemId: "t3_recover",
+    });
+    expect(interruptedReplay.retry).toHaveBeenCalledOnce();
+    expect(interruptedReplay.ack).not.toHaveBeenCalled();
+
+    rejectDelivery = false;
+    pipeline.send.mockClear();
+    const recoveredReplay = message({ stage: "comments", runId: run.id, itemId: "t3_recover" });
+    await worker.queue?.(
+      { messages: [recoveredReplay] } as MessageBatch<never>,
+      environment(pipeline) as never,
+      {} as ExecutionContext,
+    );
+
+    expect(redditAdapter.getPostWithComments).not.toHaveBeenCalled();
+    expect(pipeline.send).toHaveBeenCalledOnce();
+    expect(pipeline.send).toHaveBeenCalledWith({
+      stage: "summarize",
+      runId: run.id,
+      itemId: "t3_recover",
+    });
+    expect(recoveredReplay.ack).toHaveBeenCalledOnce();
+    expect(recoveredReplay.retry).not.toHaveBeenCalled();
+  });
+
   it("delays a fresh summary-claim retry until the lease can expire, then reclaims and completes", async () => {
     const pipeline = queue();
     const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });

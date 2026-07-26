@@ -168,25 +168,12 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
     const current = clock();
 
     try {
-      if (
-        message.body.stage !== "summarize" &&
-        await repository.getRunStatus(message.body.runId) === "failed"
-      ) {
-        if (message.body.stage === "comments") {
-          const candidate = await repository.getCandidate(
-            message.body.runId,
-            message.body.itemId,
-          );
-          if (candidate?.status === "selected") {
-            await repository.setCandidateStatus(candidate.id, "failed");
-          }
-        }
-        message.ack();
-        return;
-      }
-
       switch (message.body.stage) {
         case "discover": {
+          if (await repository.getRunStatus(message.body.runId) === "failed") {
+            message.ack();
+            return;
+          }
           const anonymous = await repository.getAnonymousCollection();
           if (!anonymous.enabled) {
             await repository.markRunFailed(
@@ -212,6 +199,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
           return;
         }
         case "comments": {
+          const runFailed = await repository.getRunStatus(message.body.runId) === "failed";
           const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
           if (candidate === null) {
             message.ack();
@@ -226,6 +214,11 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             if (completedSummaryStage(candidate.status)) {
               await refreshRunStatus(repository, message.body.runId, current.toISOString());
             }
+            message.ack();
+            return;
+          }
+          if (runFailed) {
+            await repository.setCandidateStatus(candidate.id, "failed");
             message.ack();
             return;
           }
