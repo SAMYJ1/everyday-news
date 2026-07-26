@@ -38,11 +38,13 @@ function deps(existing: KnowledgeCardRecord | null = null): {
   saveSummaryForClaim: ReturnType<typeof vi.fn>;
   completeSummaryClaim: ReturnType<typeof vi.fn>;
   releaseSummaryClaim: ReturnType<typeof vi.fn>;
+  completeCardRegeneration: ReturnType<typeof vi.fn>;
 } {
   const generate = vi.fn(async () => card);
   const saveSummaryForClaim = vi.fn(async () => true);
   const completeSummaryClaim = vi.fn(async () => true);
   const releaseSummaryClaim = vi.fn(async () => true);
+  const completeCardRegeneration = vi.fn(async () => undefined);
   return {
     deps: {
       reddit: {} as PipelineDeps["reddit"],
@@ -53,7 +55,7 @@ function deps(existing: KnowledgeCardRecord | null = null): {
         getSuccessfulSummary: vi.fn(async () => existing),
         getActiveCardRegeneration: vi.fn(async () => null),
         getPendingCardRegeneration: vi.fn(async () => null),
-        completeCardRegeneration: vi.fn(async () => undefined),
+        completeCardRegeneration,
         saveSummaryForClaim,
         claimCandidateForSummary: vi.fn(async () => true),
         completeSummaryClaim,
@@ -66,6 +68,7 @@ function deps(existing: KnowledgeCardRecord | null = null): {
     saveSummaryForClaim,
     completeSummaryClaim,
     releaseSummaryClaim,
+    completeCardRegeneration,
   };
 }
 
@@ -245,5 +248,37 @@ describe("summarizeCandidate", () => {
       claimToken,
       candidate.status,
     );
+  });
+
+  it("does not complete a regeneration after a privacy-fenced save loses claim ownership", async () => {
+    const {
+      deps: pipelineDeps,
+      saveSummaryForClaim,
+      completeSummaryClaim,
+      completeCardRegeneration,
+    } = deps();
+    const regeneration = { id: "regeneration-1", nonce: "nonce-1" };
+    pipelineDeps.repository.getPendingCardRegeneration = vi.fn(async () => ({
+      summaryId: "summary-1",
+    }));
+    saveSummaryForClaim.mockResolvedValue(false);
+    completeSummaryClaim.mockResolvedValue(false);
+
+    await summarizeCandidate(
+      pipelineDeps,
+      candidate.runId,
+      item.id,
+      regeneration,
+    );
+
+    const claimToken = (
+      pipelineDeps.repository.claimCandidateForSummary as ReturnType<typeof vi.fn>
+    ).mock.calls[0][1] as string;
+    expect(completeSummaryClaim).toHaveBeenCalledWith(
+      candidate.id,
+      claimToken,
+      "failed",
+    );
+    expect(completeCardRegeneration).not.toHaveBeenCalled();
   });
 });

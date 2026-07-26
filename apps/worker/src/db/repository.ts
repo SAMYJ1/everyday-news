@@ -243,6 +243,14 @@ export class Repository {
       .run();
   }
 
+  async getRunStatus(runId: string): Promise<FetchRun["status"] | null> {
+    const row = await this.db
+      .prepare("SELECT status FROM fetch_runs WHERE id = ?")
+      .bind(runId)
+      .first<{ status: FetchRun["status"] }>();
+    return row?.status ?? null;
+  }
+
   async claimRunDiscoveryDelivery(runId: string, token: string, claimedAt: string, staleBefore: string): Promise<boolean> {
     const result = await this.db.prepare(
       `UPDATE fetch_runs SET discovery_claim_token = ?, discovery_claimed_at = ?

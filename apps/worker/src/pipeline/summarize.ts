@@ -1,4 +1,4 @@
-import type { KnowledgeCardRecord } from "../domain";
+import type { Candidate, KnowledgeCardRecord } from "../domain";
 import {
   CARD_MODEL,
   InvalidCardResponse,
@@ -19,6 +19,35 @@ export class SummaryClaimUnavailable extends Error {
 export async function sha256(input: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function terminalizeRejectedSummary(
+  deps: PipelineDeps,
+  candidate: Candidate,
+  claimToken: string,
+  inputHash: string,
+  regeneration: { id: string; nonce: string } | null | undefined,
+  completedAt: string,
+): Promise<void> {
+  const existing = regeneration === undefined || regeneration === null
+    ? await deps.repository.getSuccessfulSummary(
+        candidate.id,
+        PROMPT_VERSION,
+        inputHash,
+      )
+    : null;
+  const completed = await deps.repository.completeSummaryClaim(
+    candidate.id,
+    claimToken,
+    existing === null ? "failed" : "summarized",
+  );
+  if (completed && regeneration !== undefined && regeneration !== null) {
+    await deps.repository.completeCardRegeneration(
+      regeneration.id,
+      regeneration.nonce,
+      completedAt,
+    );
+  }
 }
 
 export async function summarizeCandidate(
@@ -113,18 +142,14 @@ export async function summarizeCandidate(
         confidenceNote: "",
       }, claimToken);
       if (!saved) {
-        await deps.repository.completeSummaryClaim(
-          candidate.id,
+        await terminalizeRejectedSummary(
+          deps,
+          candidate,
           claimToken,
-          "summarized",
+          inputHash,
+          requestedRegeneration,
+          claimedAt.toISOString(),
         );
-        if (requestedRegeneration !== undefined && requestedRegeneration !== null) {
-          await deps.repository.completeCardRegeneration(
-            requestedRegeneration.id,
-            requestedRegeneration.nonce,
-            claimedAt.toISOString(),
-          );
-        }
         return;
       }
       await deps.repository.completeSummaryClaim(
@@ -153,7 +178,17 @@ export async function summarizeCandidate(
       { ...base, ...card, status: "draft" },
       claimToken,
     );
-    if (!saved) return;
+    if (!saved) {
+      await terminalizeRejectedSummary(
+        deps,
+        candidate,
+        claimToken,
+        inputHash,
+        requestedRegeneration,
+        claimedAt.toISOString(),
+      );
+      return;
+    }
     await deps.repository.completeSummaryClaim(
       candidate.id,
       claimToken,

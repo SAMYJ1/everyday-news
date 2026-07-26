@@ -23,6 +23,9 @@ import type { CardGenerator } from "./ai/workers-ai";
 const SHANGHAI_TIME_ZONE = "Asia/Shanghai";
 const SUMMARY_CLAIM_RETRY_DELAY_SECONDS = Math.ceil(SUMMARY_CLAIM_LEASE_MS / 1_000);
 const RUN_DELIVERY_CLAIM_LEASE_MS = 60_000;
+// Reddit transport retries use the delivery attempt number: 30s, 60s, 120s, 240s, then 300s.
+const REDDIT_RETRY_BASE_DELAY_SECONDS = 30;
+const REDDIT_RETRY_MAX_DELAY_SECONDS = 300;
 
 export class PipelineTemporaryFailure extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -49,9 +52,16 @@ function shanghaiLocalDate(now: Date): string {
 }
 
 function isTemporaryFailure(error: unknown): boolean {
-  return error instanceof RedditTemporaryFailure ||
-    error instanceof WorkersAiTemporaryFailure ||
+  return error instanceof WorkersAiTemporaryFailure ||
     error instanceof PipelineTemporaryFailure;
+}
+
+function redditRetryDelaySeconds(attempts: number): number {
+  const exponent = Math.max(0, attempts - 1);
+  return Math.min(
+    REDDIT_RETRY_MAX_DELAY_SECONDS,
+    REDDIT_RETRY_BASE_DELAY_SECONDS * (2 ** exponent),
+  );
 }
 
 function accessFailureCode(error: unknown): AccessFailureCode | null {
@@ -158,6 +168,23 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
     const current = clock();
 
     try {
+      if (
+        message.body.stage !== "summarize" &&
+        await repository.getRunStatus(message.body.runId) === "failed"
+      ) {
+        if (message.body.stage === "comments") {
+          const candidate = await repository.getCandidate(
+            message.body.runId,
+            message.body.itemId,
+          );
+          if (candidate?.status === "selected") {
+            await repository.setCandidateStatus(candidate.id, "failed");
+          }
+        }
+        message.ack();
+        return;
+      }
+
       switch (message.body.stage) {
         case "discover": {
           const anonymous = await repository.getAnonymousCollection();
@@ -253,6 +280,19 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
       }
       const accessCode = accessFailureCode(error);
       if (accessCode !== null) {
+        if (message.body.stage === "comments") {
+          try {
+            const candidate = await repository.getCandidate(
+              message.body.runId,
+              message.body.itemId,
+            );
+            if (candidate?.status === "selected") {
+              await repository.setCandidateStatus(candidate.id, "failed");
+            }
+          } catch {
+            // The run-level terminal failure is independent of candidate recovery.
+          }
+        }
         try {
           await recordAccessFailure(repository, accessCode, current.toISOString());
         } catch {
@@ -269,6 +309,12 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
           // Access denial is terminal even when its run failure cannot be persisted.
         }
         message.ack();
+        return;
+      }
+      if (error instanceof RedditTemporaryFailure) {
+        message.retry({
+          delaySeconds: redditRetryDelaySeconds(message.attempts),
+        });
         return;
       }
       if (isTemporaryFailure(error)) {

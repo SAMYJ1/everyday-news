@@ -80,9 +80,13 @@ function queue(sendImplementation: (message: unknown) => Promise<void> = async (
   return { send };
 }
 
-function message(body: { stage: "discover"; runId: string } | { stage: "comments" | "summarize"; runId: string; itemId: string }) {
+function message(
+  body: { stage: "discover"; runId: string } | { stage: "comments" | "summarize"; runId: string; itemId: string },
+  attempts = 1,
+) {
   return {
     body,
+    attempts,
     ack: vi.fn(),
     retry: vi.fn(),
   };
@@ -372,18 +376,103 @@ describe("pipeline orchestration", () => {
   });
 
   it.each([
-    new RedditTemporaryFailure("Reddit unavailable"),
-    new WorkersAiTemporaryFailure("AI unavailable"),
-  ])("retries typed temporary failures", async (failure) => {
+    [1, 30],
+    [2, 60],
+  ])("retries Reddit temporary failures with exponential delay on attempt %i", async (attempts, delaySeconds) => {
     const pipeline = queue();
     const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
+    const failure = new RedditTemporaryFailure("Reddit unavailable");
     const worker = createWorker({ reddit: reddit({ listTopPosts: async () => { throw failure; } }), now: () => now });
-    const queued = message({ stage: "discover", runId: run.id });
+    const queued = message({ stage: "discover", runId: run.id }, attempts);
 
     await worker.queue?.({ messages: [queued] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
 
-    expect(queued.retry).toHaveBeenCalledOnce();
+    expect(queued.retry).toHaveBeenCalledWith({ delaySeconds });
     expect(queued.ack).not.toHaveBeenCalled();
+  });
+
+  it("preserves the default retry behavior for Workers AI temporary failures", async () => {
+    const pipeline = queue();
+    const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
+    const generator = {
+      generate: vi.fn(async () => {
+        throw new WorkersAiTemporaryFailure("AI unavailable");
+      }),
+    };
+    await repository.upsertSourceItem(item());
+    await repository.replaceComments("t3_post1", [comment("t3_post1")]);
+    await repository.saveCandidate(candidate(run.id, "t3_post1", "comments_ready"));
+    const worker = createWorker({ reddit: reddit(), generator, now: () => now });
+    const queued = message({ stage: "summarize", runId: run.id, itemId: "t3_post1" });
+
+    await worker.queue?.({ messages: [queued] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
+
+    expect(queued.retry).toHaveBeenCalledWith();
+    expect(queued.ack).not.toHaveBeenCalled();
+  });
+
+  it("stops a replayed discover stage after the run records Reddit access denial", async () => {
+    const pipeline = queue();
+    const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
+    const redditAdapter = reddit({
+      listTopPosts: async () => {
+        throw new RedditAccessDenied(403);
+      },
+    });
+    const worker = createWorker({ reddit: redditAdapter, now: () => now });
+    const denied = message({ stage: "discover", runId: run.id });
+    const replay = message({ stage: "discover", runId: run.id });
+
+    await worker.queue?.(
+      { messages: [denied, replay] } as MessageBatch<never>,
+      environment(pipeline) as never,
+      {} as ExecutionContext,
+    );
+
+    expect(redditAdapter.listTopPosts).toHaveBeenCalledOnce();
+    expect(denied.ack).toHaveBeenCalledOnce();
+    expect(replay.ack).toHaveBeenCalledOnce();
+    expect(pipeline.send).not.toHaveBeenCalled();
+    expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({
+      status: "failed",
+      errorCode: "forbidden",
+    });
+  });
+
+  it("stops sibling comment stages after one marks the run failed", async () => {
+    const pipeline = queue();
+    const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
+    await repository.upsertSourceItem(item("t3_denied"));
+    await repository.upsertSourceItem(item("t3_sibling"));
+    await repository.saveCandidate(candidate(run.id, "t3_denied"));
+    await repository.saveCandidate({
+      ...candidate(run.id, "t3_sibling"),
+      id: `${run.id}:t3_sibling`,
+      itemId: "t3_sibling",
+      rank: 2,
+    });
+    const redditAdapter = reddit({
+      getPostWithComments: async (itemId) => {
+        if (itemId === "t3_denied") throw new RedditAccessDenied(403);
+        return { item: item(itemId), comments: [comment(itemId)] };
+      },
+    });
+    const worker = createWorker({ reddit: redditAdapter, now: () => now });
+    const denied = message({ stage: "comments", runId: run.id, itemId: "t3_denied" });
+    const sibling = message({ stage: "comments", runId: run.id, itemId: "t3_sibling" });
+
+    await worker.queue?.(
+      { messages: [denied, sibling] } as MessageBatch<never>,
+      environment(pipeline) as never,
+      {} as ExecutionContext,
+    );
+
+    expect(redditAdapter.getPostWithComments).toHaveBeenCalledOnce();
+    expect(denied.ack).toHaveBeenCalledOnce();
+    expect(sibling.ack).toHaveBeenCalledOnce();
+    expect(pipeline.send).not.toHaveBeenCalled();
+    expect(await repository.getCandidate(run.id, "t3_denied")).toMatchObject({ status: "failed" });
+    expect(await repository.getCandidate(run.id, "t3_sibling")).toMatchObject({ status: "failed" });
   });
 
   it.each([

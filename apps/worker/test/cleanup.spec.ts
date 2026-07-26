@@ -131,9 +131,14 @@ function commentsMessage(runId: string, itemId: string) {
   };
 }
 
-function summarizeMessage(runId: string, itemId: string) {
+function summarizeMessage(
+  runId: string,
+  itemId: string,
+  regeneration?: { id: string; nonce: string },
+) {
   return {
-    body: { stage: "summarize" as const, runId, itemId },
+    body: { stage: "summarize" as const, runId, itemId, regeneration },
+    attempts: 1,
     ack: vi.fn(),
     retry: vi.fn(),
   };
@@ -497,6 +502,126 @@ describe("source cleanup", () => {
     ).toBeNull();
     expect(await repository.listCards()).toEqual([]);
     expect(await repository.getCard("summary-1")).toBeNull();
+  });
+
+  it("terminalizes an original summary claim when its source is deleted after generation", async () => {
+    const item = sourceItem("t3_deleted_during_generation");
+    await repository.createRun({
+      id: "run-1",
+      localDate: "2026-07-25",
+      startedAt: now.toISOString(),
+    });
+    await repository.upsertSourceItem(item);
+    await repository.replaceComments(item.id, [comment(item.id)]);
+    await repository.saveCandidate({
+      ...candidate(item.id),
+      status: "comments_ready",
+    });
+    await repository.completeDiscovery(
+      "run-1",
+      { discovered: 1, selected: 1 },
+      now.toISOString(),
+    );
+    const generator = {
+      generate: vi.fn(async () => {
+        await repository.removeDeletedSourceItem(item.id, now.toISOString());
+        return {
+          titleZh: "不应保存",
+          oneLineFact: "来源已删除。",
+          whyInteresting: "不应展示。",
+          commentInsights: [],
+          caveats: ["来源已删除。"],
+          confidenceNote: "不可用。",
+        };
+      }),
+    };
+    const worker = createWorker({
+      reddit: fakeReddit(async () => []),
+      generator,
+      now: () => now,
+    });
+    const message = summarizeMessage("run-1", item.id);
+
+    await worker.queue?.(
+      { messages: [message] } as MessageBatch<never>,
+      { ...env, PIPELINE: { send: vi.fn() } } as never,
+      {} as ExecutionContext,
+    );
+
+    expect(message.ack).toHaveBeenCalledOnce();
+    expect(message.retry).not.toHaveBeenCalled();
+    expect(await repository.getCandidate("run-1", item.id)).toMatchObject({
+      status: "failed",
+    });
+    expect(await repository.getRunByLocalDate("2026-07-25")).toMatchObject({
+      status: "partial",
+    });
+    expect(await repository.listCards()).toEqual([]);
+  });
+
+  it("terminalizes a regeneration when a source comment is deleted after generation", async () => {
+    const item = sourceItem("t3_comment_deleted_during_regeneration");
+    await repository.createRun({
+      id: "run-1",
+      localDate: "2026-07-25",
+      startedAt: now.toISOString(),
+    });
+    await repository.upsertSourceItem(item);
+    await repository.replaceComments(item.id, [comment(item.id)]);
+    await repository.saveCandidate(candidate(item.id));
+    await repository.completeDiscovery(
+      "run-1",
+      { discovered: 1, selected: 1 },
+      now.toISOString(),
+    );
+    await repository.saveSummary(summary(`run-1:${item.id}`));
+    const regeneration = await repository.createOrGetCardRegeneration(
+      "summary-1",
+      now.toISOString(),
+    );
+    expect(regeneration).not.toBeNull();
+    const generator = {
+      generate: vi.fn(async () => {
+        await repository.removeDeletedSourceComment(
+          "t1_comment",
+          now.toISOString(),
+        );
+        return {
+          titleZh: "不应替换",
+          oneLineFact: "评论已删除。",
+          whyInteresting: "不应展示。",
+          commentInsights: [],
+          caveats: ["评论已删除。"],
+          confidenceNote: "不可用。",
+        };
+      }),
+    };
+    const worker = createWorker({
+      reddit: fakeReddit(async () => []),
+      generator,
+      now: () => now,
+    });
+    const message = summarizeMessage("run-1", item.id, {
+      id: regeneration!.id,
+      nonce: regeneration!.nonce,
+    });
+
+    await worker.queue?.(
+      { messages: [message] } as MessageBatch<never>,
+      { ...env, PIPELINE: { send: vi.fn() } } as never,
+      {} as ExecutionContext,
+    );
+
+    expect(message.ack).toHaveBeenCalledOnce();
+    expect(message.retry).not.toHaveBeenCalled();
+    expect(await repository.getCandidate("run-1", item.id)).toMatchObject({
+      status: "failed",
+    });
+    expect(await repository.getActiveCardRegeneration(`run-1:${item.id}`)).toBeNull();
+    expect(await repository.getRunByLocalDate("2026-07-25")).toMatchObject({
+      status: "partial",
+    });
+    expect(await repository.listCards()).toEqual([]);
   });
 
   it("rejects a stale review after cleanup and defensively hides a corrupted card status", async () => {
