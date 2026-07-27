@@ -16,5 +16,13 @@
       "dead_letter_queue": "everyday-news-dead-letter"
     }]
   },
-  "ai": { "binding": "AI" }
+  "ai": { "binding": "AI" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "everyday-news",
+      "database_id": "84a35bdb-e548-467d-996f-36637088378e",
+      "migrations_dir": "migrations"
+    }
+  ]
 }
