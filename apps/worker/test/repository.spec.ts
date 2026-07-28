@@ -318,6 +318,91 @@ describe("Repository", () => {
     expect(await repository.listCards("rejected")).toHaveLength(1);
   });
 
+  it("publishes only draft and approved cards from the requested or newest content date", async () => {
+    await repository.createRun({
+      id: "run-old",
+      localDate: "2026-07-23",
+      startedAt: "2026-07-23T00:00:00.000Z",
+    });
+    await repository.createRun({
+      id: "run-new",
+      localDate: "2026-07-24",
+      startedAt: "2026-07-24T00:00:00.000Z",
+    });
+
+    async function savePublicFixture(input: {
+      id: string;
+      runId: string;
+      status: KnowledgeCardRecord["status"];
+      rank: number;
+      generatedAt: string;
+      deletedAt?: string | null;
+    }) {
+      const itemId = `item-${input.id}`;
+      const candidateId = `candidate-${input.id}`;
+      await repository.upsertSourceItem(sourceItem({
+        id: itemId,
+        externalId: `t3_${input.id}`,
+        title: `English ${input.id}`,
+        redditUrl: `https://reddit.test/${input.id}`,
+        sourceUrl: `https://example.test/${input.id}`,
+        deletedAt: input.deletedAt ?? null,
+      }));
+      await repository.saveCandidate(candidate({
+        id: candidateId,
+        runId: input.runId,
+        itemId,
+        rank: input.rank,
+      }));
+      await repository.saveSummary(summary({
+        id: input.id,
+        candidateId,
+        status: input.status,
+        generatedAt: input.generatedAt,
+      }));
+    }
+
+    await savePublicFixture({
+      id: "old-approved",
+      runId: "run-old",
+      status: "approved",
+      rank: 1,
+      generatedAt: "2026-07-23T01:00:00.000Z",
+    });
+    for (const [rank, status] of [
+      [1, "draft"],
+      [2, "approved"],
+      [3, "rejected"],
+      [4, "failed"],
+      [5, "source_deleted"],
+    ] as const) {
+      await savePublicFixture({
+        id: `${status}-card`,
+        runId: "run-new",
+        status,
+        rank,
+        generatedAt: `2026-07-24T0${rank}:00:00.000Z`,
+      });
+    }
+    await savePublicFixture({
+      id: "deleted-source-card",
+      runId: "run-new",
+      status: "draft",
+      rank: 6,
+      generatedAt: "2026-07-24T06:00:00.000Z",
+      deletedAt: "2026-07-24T07:00:00.000Z",
+    });
+
+    expect(await repository.listPublicDates()).toEqual(["2026-07-24", "2026-07-23"]);
+    expect((await repository.listPublicCards()).map(({ id }) => id)).toEqual([
+      "approved-card",
+      "draft-card",
+    ]);
+    expect((await repository.listPublicCards("2026-07-23")).map(({ id }) => id)).toEqual([
+      "old-approved",
+    ]);
+  });
+
   it("lists cards with their original title and source links", async () => {
     await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
     await repository.upsertSourceItem(sourceItem());

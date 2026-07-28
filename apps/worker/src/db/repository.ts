@@ -4,6 +4,7 @@ import type {
   FetchRun,
   KnowledgeCard,
   KnowledgeCardRecord,
+  PublicKnowledgeCard,
   SourceComment,
   SourceItem,
   SummaryStatus
@@ -49,6 +50,22 @@ interface SummaryRow {
   selection_reasons: string;
   comment_links: string;
   warnings: string;
+  run_local_date: string;
+}
+
+interface PublicSummaryRow {
+  id: string;
+  status: PublicKnowledgeCard["status"];
+  title_zh: string;
+  one_line_fact: string;
+  why_interesting: string;
+  comment_insights: string;
+  caveats: string;
+  confidence_note: string;
+  generated_at: string;
+  title_en: string | null;
+  reddit_url: string;
+  source_url: string | null;
   run_local_date: string;
 }
 
@@ -156,6 +173,24 @@ function toSummaryRecord(row: Omit<SummaryRow, "title_en" | "reddit_url" | "sour
     inputHash: row.input_hash,
     generatedAt: row.generated_at,
     reviewedAt: row.reviewed_at
+  };
+}
+
+function toPublicSummary(row: PublicSummaryRow): PublicKnowledgeCard {
+  return {
+    id: row.id,
+    status: row.status,
+    titleZh: row.title_zh,
+    oneLineFact: row.one_line_fact,
+    whyInteresting: row.why_interesting,
+    commentInsights: JSON.parse(row.comment_insights) as string[],
+    caveats: JSON.parse(row.caveats) as string[],
+    confidenceNote: row.confidence_note,
+    generatedAt: row.generated_at,
+    titleEn: row.title_en,
+    redditUrl: row.reddit_url,
+    sourceUrl: row.source_url,
+    runLocalDate: row.run_local_date,
   };
 }
 
@@ -1024,6 +1059,48 @@ export class Repository {
         ).bind(localDate);
     const result = await statement.all<FetchRunRow>();
     return result.results.map(toFetchRun);
+  }
+
+  async listPublicDates(): Promise<string[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT DISTINCT fetch_runs.local_date
+        FROM summaries
+        JOIN candidates ON candidates.id = summaries.candidate_id
+        JOIN source_items ON source_items.id = candidates.item_id
+        JOIN fetch_runs ON fetch_runs.id = candidates.run_id
+        WHERE summaries.status IN ('draft', 'approved')
+          AND source_items.deleted_at IS NULL
+        ORDER BY fetch_runs.local_date DESC`,
+      )
+      .all<{ local_date: string }>();
+    return result.results.map(({ local_date }) => local_date);
+  }
+
+  async listPublicCards(localDate?: string): Promise<PublicKnowledgeCard[]> {
+    const selectedDate = localDate ?? (await this.listPublicDates())[0];
+    if (selectedDate === undefined) return [];
+
+    const result = await this.db
+      .prepare(
+        `SELECT summaries.id, summaries.status, summaries.title_zh,
+          summaries.one_line_fact, summaries.why_interesting,
+          summaries.comment_insights, summaries.caveats, summaries.confidence_note,
+          summaries.generated_at, source_items.title AS title_en,
+          source_items.reddit_url, source_items.source_url,
+          fetch_runs.local_date AS run_local_date
+        FROM summaries
+        JOIN candidates ON candidates.id = summaries.candidate_id
+        JOIN source_items ON source_items.id = candidates.item_id
+        JOIN fetch_runs ON fetch_runs.id = candidates.run_id
+        WHERE summaries.status IN ('draft', 'approved')
+          AND source_items.deleted_at IS NULL
+          AND fetch_runs.local_date = ?
+        ORDER BY summaries.generated_at DESC, summaries.id DESC`,
+      )
+      .bind(selectedDate)
+      .all<PublicSummaryRow>();
+    return result.results.map(toPublicSummary);
   }
 
   async listCards(status?: SummaryStatus, localDate?: string): Promise<KnowledgeCard[]> {
