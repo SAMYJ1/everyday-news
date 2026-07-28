@@ -1,0 +1,11 @@
+{
+  "name": "everyday-news",
+  "private": true,
+  "engines": { "node": ">=22" },
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "test": "npm run test -w @everyday-news/worker && npm run test -w @everyday-news/web",
+    "typecheck": "npm run typecheck -w @everyday-news/worker && npm run typecheck -w @everyday-news/web",
+    "build": "npm run build -w @everyday-news/worker && npm run build -w @everyday-news/web"
+  }
+}

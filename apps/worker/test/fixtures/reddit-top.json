@@ -1,0 +1,74 @@
+{
+  "kind": "Listing",
+  "data": {
+    "children": [
+      {
+        "kind": "t3",
+        "data": {
+          "name": "t3_valid",
+          "id": "valid",
+          "title": "TIL honey never spoils",
+          "author": "curious_reader",
+          "permalink": "/r/todayilearned/comments/valid/til_honey_never_spoils/",
+          "url_overridden_by_dest": "https://example.org/honey",
+          "score": 420,
+          "upvote_ratio": 0.96,
+          "num_comments": 37,
+          "created_utc": 1721000000,
+          "stickied": false,
+          "over_18": false,
+          "removed_by_category": null
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "name": "t3_sticky",
+          "id": "sticky",
+          "title": "Weekly discussion",
+          "author": "AutoModerator",
+          "permalink": "/r/todayilearned/comments/sticky/weekly_discussion/",
+          "url": "https://www.reddit.com/r/todayilearned/comments/sticky/weekly_discussion/",
+          "score": 12,
+          "upvote_ratio": 0.8,
+          "num_comments": 4,
+          "created_utc": 1721000100,
+          "stickied": true,
+          "over_18": false
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "name": "t3_nsfw",
+          "id": "nsfw",
+          "title": "TIL an adult fact",
+          "permalink": "/r/todayilearned/comments/nsfw/til_an_adult_fact/",
+          "url": "https://example.org/adult",
+          "score": 90,
+          "num_comments": 8,
+          "created_utc": 1721000200,
+          "stickied": false,
+          "over_18": true
+        }
+      },
+      {
+        "kind": "t3",
+        "data": {
+          "name": "t3_deleted",
+          "id": "deleted",
+          "title": "[deleted]",
+          "author": null,
+          "permalink": "/r/todayilearned/comments/deleted/deleted/",
+          "url": "https://www.reddit.com/r/todayilearned/comments/deleted/deleted/",
+          "score": 0,
+          "num_comments": 0,
+          "created_utc": 1721000300,
+          "stickied": false,
+          "over_18": false,
+          "removed_by_category": "deleted"
+        }
+      }
+    ]
+  }
+}

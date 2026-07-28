@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "everyday-news-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-23",
+  "triggers": {
+    "crons": ["0 0 * * *"]
+  },
+  "queues": {
+    "producers": [{ "binding": "PIPELINE", "queue": "everyday-news-pipeline" }],
+    "consumers": [{
+      "queue": "everyday-news-pipeline",
+      "max_batch_size": 5,
+      "max_batch_timeout": 5,
+      "max_retries": 2,
+      "dead_letter_queue": "everyday-news-dead-letter"
+    }]
+  },
+  "ai": { "binding": "AI" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "everyday-news",
+      "database_id": "84a35bdb-e548-467d-996f-36637088378e",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

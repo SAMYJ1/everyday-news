@@ -17,6 +17,7 @@
 - The MVP uses anonymous `www.reddit.com/...json` access only.
 - Never rotate proxies, spoof a browser, or bypass `401`, `403`, `429`, challenge pages, or other access controls.
 - Stop the daily Reddit run on `401` or `403`; retry `429` at most once using `Retry-After`.
+- Send a descriptive owner-configured `REDDIT_USER_AGENT`; never ship an invented Reddit username.
 - After three consecutive access-control failures, disable anonymous collection until the administrator explicitly re-enables it.
 - Do not fetch or parse external article bodies in this phase.
 - AI output must distinguish the Reddit post’s claim, comment additions, and comment caveats; it is not fact-checking.
@@ -173,6 +174,7 @@ export interface Env {
   AI: Ai;
   ADMIN_KEY: string;
   APP_ORIGIN: string;
+  REDDIT_USER_AGENT: string;
 }
 
 export type PipelineMessage =
@@ -375,7 +377,7 @@ Assert that the client sends:
 expect(request.url).toBe(
   "https://www.reddit.com/r/todayilearned/top.json?t=day&limit=20&raw_json=1"
 );
-expect(request.headers.get("User-Agent")).toBe("web:everyday-news:v1.0 (private-mvp)");
+expect(request.headers.get("User-Agent")).toBe("web:everyday-news:v1.0 (by /u/test_owner)");
 ```
 
 Also assert mappings for `403`, `429` with `Retry-After`, `500`, `text/html`, and invalid JSON.
@@ -392,7 +394,7 @@ Expected: FAIL because the adapter modules do not exist.
 
 - [ ] **Step 4: Implement strict parsing and response classification**
 
-`AnonymousJsonRedditAdapter` accepts `fetcher` and `userAgent` in its constructor. It must:
+`AnonymousJsonRedditAdapter` accepts `fetcher` and `userAgent` in its constructor. Production passes `env.REDDIT_USER_AGENT`; tests pass the explicit test-only value shown above. It must:
 
 - request only `www.reddit.com`;
 - set `Accept: application/json`;
@@ -998,6 +1000,107 @@ git commit -m "feat: sync deletions and stop unsafe collection"
 
 ---
 
+### Task 10A: Close Review Dashboard Data and Date-Filtering Gaps
+
+**Files:**
+- Modify: `apps/worker/src/domain.ts`
+- Modify: `apps/worker/src/db/repository.ts`
+- Modify: `apps/worker/src/http/router.ts`
+- Modify: `apps/worker/test/http-api.spec.ts`
+- Modify: `apps/worker/test/repository.spec.ts`
+- Modify: `apps/web/src/api/client.ts`
+- Modify: `apps/web/src/App.tsx`
+- Modify: `apps/web/src/components/RunStatus.tsx`
+- Modify: `apps/web/src/components/DraftCard.tsx`
+- Modify: `apps/web/src/components/CardDetail.tsx`
+- Modify: `apps/web/src/test/App.spec.tsx`
+
+**Interfaces:**
+- `FetchRun` adds `failedCount: number`.
+- `KnowledgeCard` adds:
+
+```ts
+candidateScore: number;
+selectionReasons: string[];
+commentLinks: string[];
+warnings: Array<{ code: string; message: string }>;
+runLocalDate: string;
+```
+
+- `GET /api/runs?date=YYYY-MM-DD` returns `{ runs: FetchRun[] }`; omit
+  `date` to return the newest 30 runs.
+- `GET /api/cards?status=draft|approved|rejected&date=YYYY-MM-DD` filters
+  by the candidate run's Shanghai local date. The `date` query is optional
+  for backward compatibility.
+
+- [ ] **Step 1: Write failing repository and API tests**
+
+Verify that latest/listed runs include the count of `failed` candidates,
+card rows expose candidate score/reasons, retained comment Reddit links,
+run warnings, and local date, and exact date filters exclude other runs.
+Reject malformed dates with the standard JSON error envelope.
+
+- [ ] **Step 2: Run Worker tests and verify failure**
+
+Run:
+
+```bash
+npm run test -w @everyday-news/worker -- repository.spec.ts http-api.spec.ts
+```
+
+Expected: FAIL because enriched projections and date filters do not exist.
+
+- [ ] **Step 3: Implement enriched read models**
+
+Use SQL aggregation/subqueries rather than per-card queries. Comment links
+must include only non-deleted stored comments and preserve deterministic
+score/id order. A run warning is present only when both `error_code` and
+`error_message` are non-null. Keep all `source_deleted`, deleted-parent,
+and deleted-comment invisibility predicates from Task 10.
+
+- [ ] **Step 4: Write failing dashboard tests**
+
+Verify:
+
+```ts
+it("shows failed count, candidate score, and selection reasons");
+it("shows participating comment links and run warnings in detail");
+it("loads today drafts using the latest run local date");
+it("filters approved and rejected history by the selected date");
+```
+
+Mock `fetch`; do not contact a live Worker.
+
+- [ ] **Step 5: Implement date-aware dashboard views**
+
+Load the latest run before the initial draft query and use its `localDate`
+as the date filter. Add a native labelled `type="date"` control for
+approved/rejected history and reload only the selected status/date. Render
+all returned strings as React text. Comment links must use
+`target="_blank"` and `rel="noreferrer noopener"`.
+
+- [ ] **Step 6: Run full validation**
+
+Run:
+
+```bash
+npm test
+npm run typecheck
+npm run build
+git diff --check
+```
+
+Expected: all tests pass and both production builds succeed.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add apps/worker apps/web docs/superpowers/plans/2026-07-23-reddit-daily-knowledge-mvp.md
+git commit -m "feat: enrich review dashboard data"
+```
+
+---
+
 ### Task 11: Provision, Deploy, and Verify the MVP
 
 **Files:**
@@ -1034,6 +1137,7 @@ Document exact commands for:
 - D1 and Queue creation;
 - migration application;
 - `ADMIN_KEY` and `APP_ORIGIN` secret/config setup;
+- owner-configured `REDDIT_USER_AGENT` secret setup;
 - local fixture tests;
 - live single-request probe;
 - Worker deployment;
@@ -1093,6 +1197,7 @@ Run:
 ```bash
 npx wrangler d1 migrations apply everyday-news --remote --config apps/worker/wrangler.jsonc
 npx wrangler secret put ADMIN_KEY --config apps/worker/wrangler.jsonc
+npx wrangler secret put REDDIT_USER_AGENT --config apps/worker/wrangler.jsonc
 ```
 
 Set `APP_ORIGIN` to the final Pages origin before production validation.

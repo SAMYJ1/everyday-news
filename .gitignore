@@ -4,3 +4,4 @@ node_modules/
 dist/
 .dev.vars
 .env
+apps/worker/worker-configuration.d.ts
