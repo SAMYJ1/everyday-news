@@ -1,7 +1,7 @@
 # Public Knowledge Site and Run Recovery Design
 
 **Date:** 2026-07-28
-**Status:** Awaiting written-spec review
+**Status:** Approved
 
 ## Goal
 
