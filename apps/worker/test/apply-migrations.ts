@@ -2,33 +2,45 @@ import { applyD1Migrations, env } from "cloudflare:test";
 import initialMigration from "../migrations/0001_initial.sql?raw";
 import deliveryClaimsMigration from "../migrations/0002_delivery_claims.sql?raw";
 import anonymousFailureDaysMigration from "../migrations/0003_anonymous_failure_days.sql?raw";
+import runAttemptsMigration from "../migrations/0004_run_attempts.sql?raw";
 
-const triggerStart = deliveryClaimsMigration.indexOf("CREATE TRIGGER");
-const deliveryClaimQueries = [
-  ...deliveryClaimsMigration.slice(0, triggerStart).split(";").map((query) => query.trim()).filter(Boolean),
-  deliveryClaimsMigration.slice(triggerStart).trim(),
-];
+function migrationQueries(sql: string): string[] {
+  const triggerPattern = /CREATE TRIGGER[\s\S]*?END;/g;
+  const triggers = [...sql.matchAll(triggerPattern)].map(([trigger]) => trigger.trim());
+  const statements = sql
+    .replace(triggerPattern, "")
+    .split(";")
+    .map((query) => query.trim())
+    .filter(Boolean);
+  return [...statements, ...triggers];
+}
 
-export async function applyMigrations(db: D1Database = env.DB): Promise<void> {
-  await applyD1Migrations(db, [
+export const migrations = [
     {
       name: "0001_initial.sql",
-      queries: initialMigration
-        .split(";")
-        .map((query) => query.trim())
-        .filter(Boolean)
-    }
-    ,
+      queries: migrationQueries(initialMigration)
+    },
     {
       name: "0002_delivery_claims.sql",
-      queries: deliveryClaimQueries
+      queries: migrationQueries(deliveryClaimsMigration)
     },
     {
       name: "0003_anonymous_failure_days.sql",
-      queries: anonymousFailureDaysMigration
-        .split(";")
-        .map((query) => query.trim())
-        .filter(Boolean)
+      queries: migrationQueries(anonymousFailureDaysMigration)
+    },
+    {
+      name: "0004_run_attempts.sql",
+      queries: migrationQueries(runAttemptsMigration)
     }
-  ]);
+  ];
+
+export async function applyMigrations(
+  db: D1Database = env.DB,
+  through?: string,
+): Promise<void> {
+  const end = through === undefined
+    ? migrations.length
+    : migrations.findIndex(({ name }) => name === through) + 1;
+  if (end === 0) throw new Error(`Unknown migration: ${through}`);
+  await applyD1Migrations(db, migrations.slice(0, end));
 }

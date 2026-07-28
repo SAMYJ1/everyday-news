@@ -170,7 +170,10 @@ export class Repository {
             WHERE candidates.run_id = fetch_runs.id AND candidates.status = 'failed'
           ) AS failed_count,
           error_code, error_message, started_at, finished_at
-        FROM fetch_runs WHERE local_date = ?`,
+        FROM fetch_runs
+        WHERE local_date = ?
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1`,
       )
       .bind(localDate)
       .first<FetchRunRow>();
@@ -188,11 +191,27 @@ export class Repository {
           id, local_date, status, discovered_count, selected_count, summarized_count,
           error_code, error_message, started_at, finished_at
         ) VALUES (?, ?, 'queued', 0, 0, 0, NULL, NULL, ?, NULL)
-        ON CONFLICT(local_date) DO NOTHING`,
+        ON CONFLICT DO NOTHING`,
       )
       .bind(id, input.localDate, input.startedAt)
       .run();
-    const run = await this.getRunByLocalDate(input.localDate);
+    const row = await this.db
+      .prepare(
+        `SELECT id, local_date, status, discovered_count, selected_count, summarized_count,
+          (SELECT COUNT(*) FROM candidates
+            WHERE candidates.run_id = fetch_runs.id AND candidates.status = 'failed'
+          ) AS failed_count,
+          error_code, error_message, started_at, finished_at
+        FROM fetch_runs
+        WHERE id = ? OR (
+          local_date = ? AND status IN ('queued', 'running')
+        )
+        ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, started_at DESC, id DESC
+        LIMIT 1`,
+      )
+      .bind(id, input.localDate, id)
+      .first<FetchRunRow>();
+    const run = row === null ? null : toFetchRun(row);
     if (run === null) throw new Error(`Unable to create or load run for ${input.localDate}`);
     return { run, created: (result.meta.changes ?? 0) === 1 };
   }
@@ -287,6 +306,24 @@ export class Repository {
       )
       .bind(errorCode, errorMessage, finishedAt, runId)
       .run();
+  }
+
+  async reconcileStaleRuns(staleBefore: string, finishedAt: string): Promise<number> {
+    const result = await this.db
+      .prepare(
+        `UPDATE fetch_runs
+        SET status = 'failed',
+          error_code = 'run_timed_out',
+          error_message = 'Collection run exceeded the ten-minute execution limit',
+          finished_at = ?,
+          discovery_claim_token = NULL,
+          discovery_claimed_at = NULL
+        WHERE status IN ('queued', 'running')
+          AND unixepoch(started_at) <= unixepoch(?)`,
+      )
+      .bind(finishedAt, staleBefore)
+      .run();
+    return result.meta.changes ?? 0;
   }
 
   async markRunPartial(
@@ -954,7 +991,7 @@ export class Repository {
           ) AS failed_count,
           error_code, error_message, started_at, finished_at
         FROM fetch_runs
-        ORDER BY local_date DESC, started_at DESC
+        ORDER BY local_date DESC, started_at DESC, id DESC
         LIMIT 1`
       )
       .first<FetchRunRow>();
@@ -971,7 +1008,7 @@ export class Repository {
             ) AS failed_count,
             error_code, error_message, started_at, finished_at
           FROM fetch_runs
-          ORDER BY local_date DESC, started_at DESC
+          ORDER BY local_date DESC, started_at DESC, id DESC
           LIMIT 30`,
         )
       : this.db.prepare(
@@ -982,7 +1019,7 @@ export class Repository {
             error_code, error_message, started_at, finished_at
           FROM fetch_runs
           WHERE local_date = ?
-          ORDER BY local_date DESC, started_at DESC
+          ORDER BY local_date DESC, started_at DESC, id DESC
           LIMIT 30`,
         ).bind(localDate);
     const result = await statement.all<FetchRunRow>();

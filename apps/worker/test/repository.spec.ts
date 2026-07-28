@@ -190,12 +190,64 @@ describe("Repository", () => {
     vi.useRealTimers();
   });
 
-  it("prevents two runs for the same local date", async () => {
-    await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
+  it("retains a failed same-day attempt and creates one fresh active attempt", async () => {
+    const first = await repository.createOrGetRun({
+      localDate: "2026-07-23",
+      startedAt: "2026-07-23T00:00:00.000Z",
+    });
+    await repository.markRunFailed(
+      first.run.id,
+      "run_timed_out",
+      "Run timed out",
+      "2026-07-23T00:11:00.000Z",
+    );
 
-    await expect(
-      repository.createRun({ id: "run-2", localDate: "2026-07-23", startedAt: now })
-    ).rejects.toThrow();
+    const second = await repository.createOrGetRun({
+      localDate: "2026-07-23",
+      startedAt: "2026-07-23T00:12:00.000Z",
+    });
+
+    expect(second.created).toBe(true);
+    expect(second.run.id).not.toBe(first.run.id);
+    expect((await repository.listRuns("2026-07-23")).map(({ id }) => id))
+      .toEqual([second.run.id, first.run.id]);
+  });
+
+  it("deduplicates concurrent active attempts for the same local date", async () => {
+    const [first, second] = await Promise.all([
+      repository.createOrGetRun({ localDate: "2026-07-23", startedAt: now }),
+      repository.createOrGetRun({ localDate: "2026-07-23", startedAt: now }),
+    ]);
+
+    expect(first.run.id).toBe(second.run.id);
+    expect([first.created, second.created].filter(Boolean)).toHaveLength(1);
+    expect(await repository.listRuns("2026-07-23")).toHaveLength(1);
+  });
+
+  it("reconciles only stale active runs", async () => {
+    const stale = await repository.createRun({
+      id: "stale",
+      localDate: "2026-07-23",
+      startedAt: "2026-07-23T00:00:00.000Z",
+    });
+    await repository.markRunRunning(stale.id);
+    await repository.createRun({
+      id: "fresh",
+      localDate: "2026-07-24",
+      startedAt: "2026-07-24T00:09:01.000Z",
+    });
+
+    expect(await repository.reconcileStaleRuns(
+      "2026-07-24T00:00:00.000Z",
+      "2026-07-24T00:10:00.000Z",
+    )).toBe(1);
+    expect(await repository.getRunByLocalDate("2026-07-23")).toMatchObject({
+      status: "failed",
+      errorCode: "run_timed_out",
+      errorMessage: "Collection run exceeded the ten-minute execution limit",
+      finishedAt: "2026-07-24T00:10:00.000Z",
+    });
+    expect(await repository.getRunStatus("fresh")).toBe("queued");
   });
 
   it("lists the newest runs with failed candidate counts and an exact local-date filter", async () => {
