@@ -11,6 +11,7 @@ export interface RouterDeps {
   env: Env;
   repository: Repository;
   now: Date;
+  runStaleAfterMs: number;
   startManualRun: () => Promise<{ id: string }>;
 }
 
@@ -89,6 +90,10 @@ export async function routeRequest(request: Request, deps: RouterDeps): Promise<
 
   try {
     if (request.method === "GET" && url.pathname === "/api/runs/latest") {
+      await repository.reconcileStaleRuns(
+        new Date(deps.now.getTime() - deps.runStaleAfterMs).toISOString(),
+        deps.now.toISOString(),
+      );
       return json(request, env, { run: await repository.getLatestRun() });
     }
 

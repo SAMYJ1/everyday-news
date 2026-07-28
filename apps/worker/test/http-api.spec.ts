@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Repository } from "../src/db/repository";
 import { InvalidCardResponse } from "../src/ai/workers-ai";
 import type { Candidate, KnowledgeCardRecord, SourceItem } from "../src/domain";
-import { createWorker } from "../src/index";
+import { createWorker, RUN_STALE_AFTER_MS } from "../src/index";
 import { applyMigrations } from "./apply-migrations";
 
 const now = new Date("2026-07-24T00:30:00.000Z");
@@ -153,6 +153,28 @@ describe("protected HTTP API", () => {
     });
     expect(foreignPreflight.status).toBe(403);
     expect(await foreignPreflight.json()).toEqual({ error: { code: "forbidden_origin", message: "Forbidden origin" } });
+  });
+
+  it("reconciles stale active runs before returning the latest run", async () => {
+    await repository.createRun({
+      id: "stale-run",
+      localDate: "2026-07-23",
+      startedAt: new Date(now.getTime() - RUN_STALE_AFTER_MS - 60_000).toISOString(),
+    });
+    await repository.markRunRunning("stale-run");
+    await repository.createRun({
+      id: "fresh-run",
+      localDate: "2026-07-24",
+      startedAt: new Date(now.getTime() - RUN_STALE_AFTER_MS + 60_000).toISOString(),
+    });
+
+    const response = await request("/api/runs/latest", {
+      headers: authorizedHeaders(),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await repository.getRunStatus("stale-run")).toBe("failed");
+    expect(await repository.getRunStatus("fresh-run")).toBe("queued");
   });
 
   it("lists runs and cards for an exact Shanghai local date", async () => {

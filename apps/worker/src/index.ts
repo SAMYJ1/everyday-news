@@ -23,9 +23,10 @@ import type { CardGenerator } from "./ai/workers-ai";
 const SHANGHAI_TIME_ZONE = "Asia/Shanghai";
 const SUMMARY_CLAIM_RETRY_DELAY_SECONDS = Math.ceil(SUMMARY_CLAIM_LEASE_MS / 1_000);
 const RUN_DELIVERY_CLAIM_LEASE_MS = 60_000;
-// Reddit transport retries use the delivery attempt number: 30s, 60s, 120s, 240s, then 300s.
 const REDDIT_RETRY_BASE_DELAY_SECONDS = 30;
 const REDDIT_RETRY_MAX_DELAY_SECONDS = 300;
+export const PIPELINE_MAX_RETRIES = 2;
+export const RUN_STALE_AFTER_MS = 600_000;
 
 export class PipelineTemporaryFailure extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -77,6 +78,19 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown pipeline error";
 }
 
+function logPipelineDecision(input: {
+  runId: string;
+  stage: PipelineMessage["stage"];
+  attempt: number;
+  decision: "retry" | "failed";
+  category: string;
+}): void {
+  console.error({
+    event: "pipeline_delivery_failed",
+    ...input,
+  });
+}
+
 export async function startRun(
   repository: Repository,
   pipeline: Queue<PipelineMessage>,
@@ -84,6 +98,10 @@ export async function startRun(
   _trigger: "scheduled" | "manual",
   now: Date,
 ) {
+  await repository.reconcileStaleRuns(
+    new Date(now.getTime() - RUN_STALE_AFTER_MS).toISOString(),
+    now.toISOString(),
+  );
   const result = await repository.createOrGetRun({
     localDate,
     startedAt: now.toISOString(),
@@ -166,6 +184,25 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
   ): Promise<void> {
     const deps = pipelineDeps(env, repository);
     const current = clock();
+
+    async function terminalizeExhaustedRetry(category: string): Promise<boolean> {
+      if (message.attempts <= PIPELINE_MAX_RETRIES) return false;
+      await repository.markRunFailed(
+        message.body.runId,
+        `pipeline_${message.body.stage}_retries_exhausted`,
+        "Collection stage exhausted its delivery retries",
+        current.toISOString(),
+      );
+      logPipelineDecision({
+        runId: message.body.runId,
+        stage: message.body.stage,
+        attempt: message.attempts,
+        decision: "failed",
+        category,
+      });
+      message.ack();
+      return true;
+    }
 
     try {
       switch (message.body.stage) {
@@ -268,6 +305,14 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
       }
     } catch (error) {
       if (error instanceof SummaryClaimUnavailable) {
+        if (await terminalizeExhaustedRetry("summary_claim_unavailable")) return;
+        logPipelineDecision({
+          runId: message.body.runId,
+          stage: message.body.stage,
+          attempt: message.attempts,
+          decision: "retry",
+          category: "summary_claim_unavailable",
+        });
         message.retry({ delaySeconds: SUMMARY_CLAIM_RETRY_DELAY_SECONDS });
         return;
       }
@@ -305,12 +350,28 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         return;
       }
       if (error instanceof RedditTemporaryFailure) {
+        if (await terminalizeExhaustedRetry("reddit_temporary_failure")) return;
+        logPipelineDecision({
+          runId: message.body.runId,
+          stage: message.body.stage,
+          attempt: message.attempts,
+          decision: "retry",
+          category: "reddit_temporary_failure",
+        });
         message.retry({
           delaySeconds: redditRetryDelaySeconds(message.attempts),
         });
         return;
       }
       if (isTemporaryFailure(error)) {
+        if (await terminalizeExhaustedRetry("pipeline_temporary_failure")) return;
+        logPipelineDecision({
+          runId: message.body.runId,
+          stage: message.body.stage,
+          attempt: message.attempts,
+          decision: "retry",
+          category: "pipeline_temporary_failure",
+        });
         message.retry();
         return;
       }
@@ -339,6 +400,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         env,
         repository: new Repository(env.DB),
         now: clock(),
+        runStaleAfterMs: RUN_STALE_AFTER_MS,
         startManualRun: () => {
           const now = clock();
           return startRun(
@@ -367,7 +429,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         try {
           await processMessage(message, env, repository);
         } catch {
-          message.ack();
+          message.retry();
         }
       }
     },

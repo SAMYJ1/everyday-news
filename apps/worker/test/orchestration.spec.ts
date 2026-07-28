@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkersAiTemporaryFailure } from "../src/ai/workers-ai";
 import { Repository } from "../src/db/repository";
 import type { Candidate, SourceComment, SourceItem } from "../src/domain";
-import { createWorker } from "../src/index";
+import { createWorker, PIPELINE_MAX_RETRIES, RUN_STALE_AFTER_MS } from "../src/index";
 import {
   RedditAccessDenied,
   RedditTemporaryFailure,
@@ -135,6 +135,28 @@ describe("pipeline orchestration", () => {
     expect(run).toMatchObject({ localDate: "2026-07-24", status: "running" });
     expect(pipeline.send).toHaveBeenCalledTimes(1);
     expect(pipeline.send).toHaveBeenCalledWith({ stage: "discover", runId: run?.id });
+  });
+
+  it("expires a stale same-day attempt before scheduling a replacement", async () => {
+    await repository.createRun({
+      id: "stale-run",
+      localDate: "2026-07-24",
+      startedAt: new Date(now.getTime() - RUN_STALE_AFTER_MS - 1).toISOString(),
+    });
+    await repository.markRunRunning("stale-run");
+    const pipeline = queue();
+    const worker = createWorker({ reddit: reddit(), now: () => now });
+
+    await worker.scheduled?.({} as ScheduledEvent, environment(pipeline) as never, {} as ExecutionContext);
+
+    const runs = await repository.listRuns("2026-07-24");
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).toMatchObject({ status: "running" });
+    expect(runs[1]).toMatchObject({
+      id: "stale-run",
+      status: "failed",
+      errorCode: "run_timed_out",
+    });
   });
 
   it("re-enqueues a same-date queued run after schedule delivery fails", async () => {
@@ -460,6 +482,63 @@ describe("pipeline orchestration", () => {
     await worker.queue?.({ messages: [queued] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
 
     expect(queued.retry).toHaveBeenCalledWith({ delaySeconds });
+    expect(queued.ack).not.toHaveBeenCalled();
+  });
+
+  it("marks the run failed instead of retrying after the final delivery", async () => {
+    const pipeline = queue();
+    const { run } = await repository.createOrGetRun({
+      localDate: "2026-07-24",
+      startedAt: now.toISOString(),
+    });
+    const queued = message(
+      { stage: "discover", runId: run.id },
+      PIPELINE_MAX_RETRIES + 1,
+    );
+    const worker = createWorker({
+      reddit: reddit({
+        listTopPosts: async () => {
+          throw new RedditTemporaryFailure("Reddit unavailable");
+        },
+      }),
+      now: () => now,
+    });
+
+    await worker.queue?.(
+      { messages: [queued] } as MessageBatch<never>,
+      environment(pipeline) as never,
+      {} as ExecutionContext,
+    );
+
+    expect(queued.retry).not.toHaveBeenCalled();
+    expect(queued.ack).toHaveBeenCalledOnce();
+    expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({
+      status: "failed",
+      errorCode: "pipeline_discover_retries_exhausted",
+      finishedAt: now.toISOString(),
+    });
+  });
+
+  it("retries an exception that escapes per-message recovery", async () => {
+    const queued = {
+      attempts: 1,
+      ack: vi.fn(),
+      retry: vi.fn(),
+    } as Record<string, unknown>;
+    Object.defineProperty(queued, "body", {
+      get() {
+        throw new Error("corrupt queue envelope");
+      },
+    });
+    const worker = createWorker({ now: () => now });
+
+    await worker.queue?.(
+      { messages: [queued] } as MessageBatch<never>,
+      environment(queue()) as never,
+      {} as ExecutionContext,
+    );
+
+    expect(queued.retry).toHaveBeenCalledOnce();
     expect(queued.ack).not.toHaveBeenCalled();
   });
 
