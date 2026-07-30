@@ -91,6 +91,19 @@ function logPipelineDecision(input: {
   });
 }
 
+function logPipelineBoundary(input: {
+  runId: string;
+  stage: PipelineMessage["stage"];
+  attempt: number;
+  decision: "started" | "completed";
+}): void {
+  console.log({
+    event: "pipeline_stage_boundary",
+    ...input,
+    category: "stage",
+  });
+}
+
 export async function startRun(
   repository: Repository,
   pipeline: Queue<PipelineMessage>,
@@ -185,6 +198,16 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
     const deps = pipelineDeps(env, repository);
     const current = clock();
 
+    function completeStage(): void {
+      logPipelineBoundary({
+        runId: message.body.runId,
+        stage: message.body.stage,
+        attempt: message.attempts,
+        decision: "completed",
+      });
+      message.ack();
+    }
+
     async function terminalizeExhaustedRetry(category: string): Promise<boolean> {
       if (message.attempts <= PIPELINE_MAX_RETRIES) return false;
       await repository.markRunFailed(
@@ -204,11 +227,18 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
       return true;
     }
 
+    logPipelineBoundary({
+      runId: message.body.runId,
+      stage: message.body.stage,
+      attempt: message.attempts,
+      decision: "started",
+    });
+
     try {
       switch (message.body.stage) {
         case "discover": {
           if (await repository.getRunStatus(message.body.runId) === "failed") {
-            message.ack();
+            completeStage();
             return;
           }
           const anonymous = await repository.getAnonymousCollection();
@@ -219,6 +249,13 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
               "Anonymous Reddit collection is disabled",
               current.toISOString(),
             );
+            logPipelineDecision({
+              runId: message.body.runId,
+              stage: message.body.stage,
+              attempt: message.attempts,
+              decision: "failed",
+              category: "anonymous_disabled",
+            });
             message.ack();
             return;
           }
@@ -232,31 +269,31 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             );
           }
           await refreshRunStatus(repository, message.body.runId, current.toISOString());
-          message.ack();
+          completeStage();
           return;
         }
         case "comments": {
           const runFailed = await repository.getRunStatus(message.body.runId) === "failed";
           const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
           if (candidate === null) {
-            message.ack();
+            completeStage();
             return;
           }
           if (candidate.status === "comments_ready") {
             await sendPipeline(env.PIPELINE, { ...message.body, stage: "summarize" });
-            message.ack();
+            completeStage();
             return;
           }
           if (completedCommentsStage(candidate.status)) {
             if (completedSummaryStage(candidate.status)) {
               await refreshRunStatus(repository, message.body.runId, current.toISOString());
             }
-            message.ack();
+            completeStage();
             return;
           }
           if (runFailed) {
             await repository.setCandidateStatus(candidate.id, "failed");
-            message.ack();
+            completeStage();
             return;
           }
           const anonymous = await repository.getAnonymousCollection();
@@ -268,19 +305,26 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
               "Anonymous Reddit collection is disabled",
               current.toISOString(),
             );
+            logPipelineDecision({
+              runId: message.body.runId,
+              stage: message.body.stage,
+              attempt: message.attempts,
+              decision: "failed",
+              category: "anonymous_disabled",
+            });
             message.ack();
             return;
           }
           await collectComments(deps, message.body.runId, message.body.itemId);
           await repository.setCandidateStatus(candidate.id, "comments_ready");
           await sendPipeline(env.PIPELINE, { ...message.body, stage: "summarize" });
-          message.ack();
+          completeStage();
           return;
         }
         case "summarize": {
           const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
           if (candidate === null) {
-            message.ack();
+            completeStage();
             return;
           }
           if (
@@ -289,7 +333,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             await repository.getActiveCardRegeneration(candidate.id) === null
           ) {
             await refreshRunStatus(repository, message.body.runId, current.toISOString());
-            message.ack();
+            completeStage();
             return;
           }
           await summarizeCandidate(
@@ -299,7 +343,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             message.body.regeneration,
           );
           await refreshRunStatus(repository, message.body.runId, current.toISOString());
-          message.ack();
+          completeStage();
           return;
         }
       }
@@ -336,16 +380,19 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         } catch {
           // Breaker persistence is best effort; the run failure is independent.
         }
-        try {
-          await repository.markRunFailed(
-            message.body.runId,
-            accessCode,
-            errorMessage(error),
-            current.toISOString(),
-          );
-        } catch {
-          // Access denial is terminal even when its run failure cannot be persisted.
-        }
+        await repository.markRunFailed(
+          message.body.runId,
+          accessCode,
+          errorMessage(error),
+          current.toISOString(),
+        );
+        logPipelineDecision({
+          runId: message.body.runId,
+          stage: message.body.stage,
+          attempt: message.attempts,
+          decision: "failed",
+          category: accessCode,
+        });
         message.ack();
         return;
       }
@@ -376,20 +423,23 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         return;
       }
 
-      try {
-        if (message.body.stage !== "discover") {
-          const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
-          if (candidate !== null) await repository.setCandidateStatus(candidate.id, "failed");
-        }
-        await repository.markRunPartial(
-          message.body.runId,
-          `pipeline_${message.body.stage}_failed`,
-          errorMessage(error),
-          current.toISOString(),
-        );
-      } catch {
-        // Unknown recovery-write failures are terminal for this delivery.
+      if (message.body.stage !== "discover") {
+        const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
+        if (candidate !== null) await repository.setCandidateStatus(candidate.id, "failed");
       }
+      await repository.markRunPartial(
+        message.body.runId,
+        `pipeline_${message.body.stage}_failed`,
+        errorMessage(error),
+        current.toISOString(),
+      );
+      logPipelineDecision({
+        runId: message.body.runId,
+        stage: message.body.stage,
+        attempt: message.attempts,
+        decision: "failed",
+        category: "pipeline_stage_failure",
+      });
       message.ack();
     }
   }
@@ -429,6 +479,22 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         try {
           await processMessage(message, env, repository);
         } catch {
+          try {
+            logPipelineDecision({
+              runId: message.body.runId,
+              stage: message.body.stage,
+              attempt: message.attempts,
+              decision: "retry",
+              category: "unhandled_message_failure",
+            });
+          } catch {
+            console.error({
+              event: "pipeline_delivery_failed",
+              attempt: message.attempts,
+              decision: "retry",
+              category: "invalid_queue_envelope",
+            });
+          }
           message.retry();
         }
       }

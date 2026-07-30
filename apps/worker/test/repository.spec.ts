@@ -236,6 +236,11 @@ describe("Repository", () => {
       localDate: "2026-07-24",
       startedAt: "2026-07-24T00:09:01.000Z",
     });
+    await repository.createRun({
+      id: "boundary",
+      localDate: "2026-07-25",
+      startedAt: "2026-07-24T00:00:00.000Z",
+    });
 
     expect(await repository.reconcileStaleRuns(
       "2026-07-24T00:00:00.000Z",
@@ -248,6 +253,7 @@ describe("Repository", () => {
       finishedAt: "2026-07-24T00:10:00.000Z",
     });
     expect(await repository.getRunStatus("fresh")).toBe("queued");
+    expect(await repository.getRunStatus("boundary")).toBe("queued");
   });
 
   it("lists the newest runs with failed candidate counts and an exact local-date filter", async () => {

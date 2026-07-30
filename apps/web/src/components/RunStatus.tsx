@@ -24,7 +24,7 @@ function isStaleRun(run: FetchRun | null): boolean {
   if (run?.status !== "queued" && run?.status !== "running") return false;
   const startedAt = new Date(run.startedAt).getTime();
   return Number.isFinite(startedAt) &&
-    Date.now() - startedAt >= RUN_STALE_AFTER_MS;
+    Date.now() - startedAt > RUN_STALE_AFTER_MS;
 }
 
 function runStatusLabel(run: FetchRun): string {

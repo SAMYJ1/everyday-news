@@ -119,6 +119,7 @@ describe("pipeline orchestration", () => {
   let repository: Repository;
 
   beforeEach(async () => {
+    vi.restoreAllMocks();
     await applyMigrations();
     await clearDatabase();
     repository = new Repository(env.DB);
@@ -190,6 +191,40 @@ describe("pipeline orchestration", () => {
     expect(queued.ack).toHaveBeenCalledOnce();
     expect(pipeline.send).toHaveBeenCalledWith({ stage: "comments", runId: run.id, itemId: "t3_one" });
     expect(pipeline.send).toHaveBeenCalledWith({ stage: "comments", runId: run.id, itemId: "t3_two" });
+  });
+
+  it("emits safe structured events at successful stage boundaries", async () => {
+    const pipeline = queue();
+    const { run } = await repository.createOrGetRun({
+      localDate: "2026-07-24",
+      startedAt: now.toISOString(),
+    });
+    const logged = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const worker = createWorker({ reddit: reddit(), now: () => now });
+    const queued = message({ stage: "discover", runId: run.id });
+
+    await worker.queue?.(
+      { messages: [queued] } as MessageBatch<never>,
+      environment(pipeline) as never,
+      {} as ExecutionContext,
+    );
+
+    expect(logged).toHaveBeenCalledWith({
+      event: "pipeline_stage_boundary",
+      runId: run.id,
+      stage: "discover",
+      attempt: 1,
+      category: "stage",
+      decision: "started",
+    });
+    expect(logged).toHaveBeenCalledWith({
+      event: "pipeline_stage_boundary",
+      runId: run.id,
+      stage: "discover",
+      attempt: 1,
+      category: "stage",
+      decision: "completed",
+    });
   });
 
   it("replays every discovery fan-out message after a partial queue delivery", async () => {
@@ -520,6 +555,7 @@ describe("pipeline orchestration", () => {
   });
 
   it("retries an exception that escapes per-message recovery", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const queued = {
       attempts: 1,
       ack: vi.fn(),
@@ -540,6 +576,12 @@ describe("pipeline orchestration", () => {
 
     expect(queued.retry).toHaveBeenCalledOnce();
     expect(queued.ack).not.toHaveBeenCalled();
+    expect(logged).toHaveBeenCalledWith({
+      event: "pipeline_delivery_failed",
+      attempt: 1,
+      decision: "retry",
+      category: "invalid_queue_envelope",
+    });
   });
 
   it("preserves the default retry behavior for Workers AI temporary failures", async () => {
@@ -642,7 +684,7 @@ describe("pipeline orchestration", () => {
     expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({ status: "failed", errorCode });
   });
 
-  it("acknowledges access denial even when persisting the failed run throws", async () => {
+  it("retries access denial when persisting the failed run throws", async () => {
     const pipeline = queue();
     const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
     vi.spyOn(Repository.prototype, "markRunFailed").mockRejectedValueOnce(new Error("D1 unavailable"));
@@ -654,15 +696,15 @@ describe("pipeline orchestration", () => {
 
     await worker.queue?.({ messages: [queued] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
 
-    expect(queued.ack).toHaveBeenCalledOnce();
-    expect(queued.retry).not.toHaveBeenCalled();
+    expect(queued.ack).not.toHaveBeenCalled();
+    expect(queued.retry).toHaveBeenCalledOnce();
     expect(await repository.getAnonymousCollection()).toEqual({
       enabled: true,
       consecutiveFailures: 1,
     });
   });
 
-  it("acknowledges an unknown recovery-write failure and continues to later messages", async () => {
+  it("retries an unknown recovery-write failure and continues to later messages", async () => {
     const pipeline = queue();
     const firstRun = (await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() })).run;
     const secondRun = (await repository.createOrGetRun({ localDate: "2026-07-25", startedAt: now.toISOString() })).run;
@@ -675,14 +717,23 @@ describe("pipeline orchestration", () => {
       },
     });
     vi.spyOn(Repository.prototype, "markRunPartial").mockRejectedValueOnce(new Error("D1 unavailable"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const worker = createWorker({ reddit: redditAdapter, now: () => now });
     const first = message({ stage: "discover", runId: firstRun.id });
     const later = message({ stage: "discover", runId: secondRun.id });
 
     await worker.queue?.({ messages: [first, later] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
 
-    expect(first.ack).toHaveBeenCalledOnce();
-    expect(first.retry).not.toHaveBeenCalled();
+    expect(first.ack).not.toHaveBeenCalled();
+    expect(first.retry).toHaveBeenCalledOnce();
+    expect(logged).toHaveBeenCalledWith({
+      event: "pipeline_delivery_failed",
+      runId: firstRun.id,
+      stage: "discover",
+      attempt: 1,
+      decision: "retry",
+      category: "unhandled_message_failure",
+    });
     expect(later.ack).toHaveBeenCalledOnce();
     expect(pipeline.send).toHaveBeenCalledWith({
       stage: "comments",

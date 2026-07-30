@@ -354,7 +354,7 @@ export class Repository {
           discovery_claim_token = NULL,
           discovery_claimed_at = NULL
         WHERE status IN ('queued', 'running')
-          AND unixepoch(started_at) <= unixepoch(?)`,
+          AND unixepoch(started_at) < unixepoch(?)`,
       )
       .bind(finishedAt, staleBefore)
       .run();

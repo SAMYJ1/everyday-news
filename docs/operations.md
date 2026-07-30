@@ -230,7 +230,20 @@ curl --silent --show-error --output /dev/null --write-out '%{http_code}\n' \
   "$WORKER_URL/api/runs/latest"
 ```
 
-The status must be `401`. Then start exactly one manual run:
+The status must be `401`.
+
+Confirm the public feed is available without an administrator key:
+
+```sh
+curl --fail-with-body --silent --show-error "$WORKER_URL/api/public/dates"
+curl --fail-with-body --silent --show-error "$WORKER_URL/api/public/cards"
+```
+
+Public cards may only have `draft` or `approved` status and must not include
+model, prompt, input-hash, review-history, run-error, setting, or credential
+fields.
+
+Then start exactly one manual run:
 
 ```sh
 curl --fail-with-body --silent --show-error \
@@ -269,23 +282,51 @@ curl --fail-with-body --silent --show-error \
 Re-enable only after the access problem has been resolved. This endpoint does
 not bypass Reddit access controls.
 
-## 6. Browser acceptance
+## 6. Targeted stalled-run recovery
+
+Ordinary stale runs are reconciled automatically when the latest-run endpoint
+is read or a new run starts. For a historical incident that predates that
+logic, resolve the exact run ID first and inspect it before writing:
+
+```sh
+npx wrangler d1 execute everyday-news --remote \
+  --config apps/worker/wrangler.jsonc \
+  --command "SELECT id, local_date, status, started_at, finished_at FROM fetch_runs WHERE id = 'EXACT_RUN_ID'"
+```
+
+Only if that exact row is still `queued` or `running`, update that one ID:
+
+```sh
+npx wrangler d1 execute everyday-news --remote \
+  --config apps/worker/wrangler.jsonc \
+  --command "UPDATE fetch_runs SET status = 'failed', error_code = 'run_timed_out', error_message = 'Collection run exceeded the ten-minute execution limit', finished_at = CURRENT_TIMESTAMP WHERE id = 'EXACT_RUN_ID' AND status IN ('queued', 'running')"
+```
+
+Read the row again and confirm it is terminal. If a matching dead-letter
+message exists, verify its complete body and acknowledge only that message;
+never purge the whole dead-letter queue as part of a single-run recovery.
+
+## 7. Browser acceptance
 
 Open the production Pages URL and verify:
 
-1. A missing or wrong key cannot load runs or cards.
-2. The correct key shows the latest run.
-3. Drafts show the Reddit post, external source, participating comment links,
+1. `/` loads the public feed without a key and shows only draft/approved cards.
+2. `/admin` shows the administrator-key gate.
+3. A missing or wrong key cannot load private runs or management card data.
+4. The correct key shows the latest run.
+5. Drafts show the Reddit post, external source, participating comment links,
    and all structured Chinese sections.
-4. Approve, reject, and regenerate each work once.
-5. A second manual start on the same Shanghai date does not create a duplicate.
-6. Typed run failures are readable.
-7. No collected content appears before authentication.
+6. Approve, reject, and regenerate each work once.
+7. A second manual start while one is active does not create a duplicate.
+8. A terminal same-day attempt can be followed by a fresh attempt.
+9. Typed run failures and stale-run timeout warnings are readable.
+10. Rejected, failed, source-deleted, and deleted-source cards do not appear
+    on the public page.
 
 The key must remain in session storage only. Inspect the built files and
 request URLs if there is any suspicion that it was included in the frontend.
 
-## 7. Cron verification
+## 8. Cron verification
 
 The configured trigger is `0 0 * * *` (00:00 UTC, 08:00 Asia/Shanghai).
 After the next trigger, query that Shanghai local date:
@@ -309,7 +350,7 @@ run), clear the values:
 unset ADMIN_KEY WORKER_URL
 ```
 
-## 8. OAuth adapter replacement prerequisites
+## 9. OAuth adapter replacement prerequisites
 
 Do not switch the source adapter until Reddit has approved the application and
 the owner has:
