@@ -113,7 +113,8 @@ export class RssRedditAdapter implements RedditSourceAdapter {
   private async requestAtom(url: URL): Promise<string> {
     let response: Response;
     try {
-      response = await this.fetcher(
+      const fetcher = this.fetcher;
+      response = await fetcher(
         new Request(url, {
           headers: {
             Accept: "application/atom+xml, application/rss+xml;q=0.9",

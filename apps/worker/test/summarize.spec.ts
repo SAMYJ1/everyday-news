@@ -89,8 +89,8 @@ describe("summarizeCandidate", () => {
     expect(generate).toHaveBeenCalledWith({ item, comments: [comment] });
     expect(saveSummaryForClaim).toHaveBeenCalledWith(
       expect.objectContaining({
-        candidateId: candidate.id, status: "draft", ...card, model: "@cf/meta/llama-3.1-8b-instruct-fast",
-        promptVersion: "v1", inputHash: expect.stringMatching(/^[a-f0-9]{64}$/), generatedAt: timestamp
+        candidateId: candidate.id, status: "draft", ...card, model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        promptVersion: "v2", inputHash: expect.stringMatching(/^[a-f0-9]{64}$/), generatedAt: timestamp
       }),
       claimToken,
     );
@@ -104,7 +104,7 @@ describe("summarizeCandidate", () => {
   it("does not call AI or save another card when the input already succeeded", async () => {
     const existing: KnowledgeCardRecord = {
       id: "summary-1", candidateId: candidate.id, status: "draft", ...card,
-      model: "@cf/meta/llama-3.1-8b-instruct-fast", promptVersion: "v1", inputHash: "hash", generatedAt: timestamp
+      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", promptVersion: "v2", inputHash: "hash", generatedAt: timestamp
     };
     const { deps: pipelineDeps, generate, saveSummaryForClaim, completeSummaryClaim } =
       deps(existing);
@@ -136,7 +136,7 @@ describe("summarizeCandidate", () => {
     ).mock.calls[0][1] as string;
     expect(saveSummaryForClaim).toHaveBeenCalledWith(
       expect.objectContaining({
-        candidateId: candidate.id, status: "failed", model: "@cf/meta/llama-3.1-8b-instruct-fast", promptVersion: "v1"
+        candidateId: candidate.id, status: "failed", model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", promptVersion: "v2"
       }),
       claimToken,
     );
@@ -150,7 +150,7 @@ describe("summarizeCandidate", () => {
   it("does not mark a preserved successful summary as failed", async () => {
     const existing: KnowledgeCardRecord = {
       id: "summary-1", candidateId: candidate.id, status: "draft", ...card,
-      model: "@cf/meta/llama-3.1-8b-instruct-fast", promptVersion: "v1", inputHash: "hash", generatedAt: timestamp
+      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", promptVersion: "v2", inputHash: "hash", generatedAt: timestamp
     };
     const { deps: pipelineDeps, saveSummaryForClaim, completeSummaryClaim } = deps();
     pipelineDeps.generator.generate = vi.fn(async () => {

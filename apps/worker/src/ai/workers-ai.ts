@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { SourceComment, SourceItem } from "../domain";
 import { KnowledgeCardSchema, type KnowledgeCard } from "./card-schema";
 
-export const CARD_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
+export const CARD_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
 export interface CardInput {
   item: SourceItem;
@@ -23,6 +23,11 @@ function promptFor({ item, comments }: CardInput, repair = false): string {
     "请根据以下 Reddit 原帖与评论摘录，生成简洁的中文知识卡片 JSON。",
     "只能将帖子内容表述为“原帖声称”，只能将评论内容表述为“评论补充”或评论观点。",
     "不得声称已进行外部事实核查，也不得把外部链接内容当作已验证事实。",
+    "titleZh 必须是 4 至 30 个汉字左右的具体标题，不能使用“我”等占位词。",
+    "oneLineFact 必须用完整中文句子概括原帖主张，并以“原帖声称”开头。",
+    "whyInteresting 必须具体说明这条知识为什么值得读，不能只写字段标签。",
+    "commentInsights 与 caveats 的每一项都必须是有实际信息的完整中文句子。",
+    "confidenceNote 必须明确说明内容只基于原帖与评论、尚未完成外部核验。",
     "英文原标题和链接是只读元数据：保持原样，不要翻译、改写或臆造。",
     `英文原标题（只读元数据）：${item.title ?? "（无标题）"}`,
     `Reddit URL（只读元数据）：${item.redditUrl}`,
@@ -49,20 +54,53 @@ export class WorkersAiTemporaryFailure extends Error {
   }
 }
 
-function responseValue(output: Record<string, unknown>): unknown {
-  if (typeof output.response === "string") {
-    try {
-      return JSON.parse(output.response);
-    } catch (error) {
-      throw new InvalidCardResponse("Workers AI returned invalid JSON", {
-        cause: error,
-      });
-    }
+function parseResponseString(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    throw new InvalidCardResponse("Workers AI returned invalid JSON", {
+      cause: error,
+    });
   }
-  if (typeof output.response === "object" && output.response !== null) {
-    return output.response;
+}
+
+function responseValue(output: unknown): unknown {
+  if (typeof output === "string") {
+    return parseResponseString(output);
+  }
+  if (typeof output !== "object" || output === null) {
+    throw new InvalidCardResponse("Workers AI did not return a JSON response");
+  }
+  const response = "response" in output ? output.response : undefined;
+  if (typeof response === "string") {
+    return parseResponseString(response);
+  }
+  if (typeof response === "object" && response !== null) {
+    return response;
+  }
+  if ("titleZh" in output) {
+    return output;
   }
   throw new InvalidCardResponse("Workers AI did not return a JSON response");
+}
+
+function normalizeCardCandidate(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) return value;
+  if (!("titleZh" in value) || !("oneLineFact" in value)) return value;
+  if (
+    typeof value.titleZh !== "string" ||
+    value.titleZh.length >= 4 ||
+    typeof value.oneLineFact !== "string"
+  ) {
+    return value;
+  }
+  const derivedTitle = value.oneLineFact
+    .replace(/^原帖声称[，,:：\s]*/, "")
+    .split(/[。！？!?]/, 1)[0]
+    ?.trim()
+    .slice(0, 30);
+  if (derivedTitle === undefined || derivedTitle.length < 4) return value;
+  return { ...value, titleZh: derivedTitle };
 }
 
 export class WorkersAiCardGenerator implements CardGenerator {
@@ -76,6 +114,7 @@ export class WorkersAiCardGenerator implements CardGenerator {
       try {
         output = await this.ai.run(CARD_MODEL, {
           prompt: promptFor(input, attempt === 1),
+          max_tokens: 700,
           temperature: 0.2,
           response_format: {
             type: "json_schema",
@@ -88,7 +127,15 @@ export class WorkersAiCardGenerator implements CardGenerator {
         });
       }
       try {
-        return KnowledgeCardSchema.parse(responseValue(output));
+        const card = KnowledgeCardSchema.parse(
+          normalizeCardCandidate(responseValue(output)),
+        );
+        if (input.comments.length > 0 && card.commentInsights.length === 0) {
+          throw new InvalidCardResponse(
+            "Workers AI omitted comment insights despite available comments",
+          );
+        }
+        return card;
       } catch (error) {
         lastInvalidResponse =
           error instanceof InvalidCardResponse

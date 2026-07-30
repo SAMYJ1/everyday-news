@@ -25,6 +25,7 @@ const SUMMARY_CLAIM_RETRY_DELAY_SECONDS = Math.ceil(SUMMARY_CLAIM_LEASE_MS / 1_0
 const RUN_DELIVERY_CLAIM_LEASE_MS = 60_000;
 const REDDIT_RETRY_BASE_DELAY_SECONDS = 30;
 const REDDIT_RETRY_MAX_DELAY_SECONDS = 300;
+const REDDIT_RATE_LIMIT_MIN_DELAY_SECONDS = 60;
 const REDDIT_RSS_REQUEST_SPACING_SECONDS = 75;
 export const PIPELINE_MAX_RETRIES = 2;
 export const RUN_STALE_AFTER_MS = 600_000;
@@ -66,11 +67,17 @@ function redditRetryDelaySeconds(attempts: number): number {
   );
 }
 
+function redditRateLimitDelaySeconds(retryAfterSeconds: number): number {
+  return Math.min(
+    REDDIT_RETRY_MAX_DELAY_SECONDS,
+    Math.max(REDDIT_RATE_LIMIT_MIN_DELAY_SECONDS, retryAfterSeconds),
+  );
+}
+
 function accessFailureCode(error: unknown): AccessFailureCode | null {
   if (error instanceof RedditAccessDenied) {
     return error.status === 401 ? "unauthorized" : "forbidden";
   }
-  if (error instanceof RedditRateLimited) return "rate_limited";
   if (error instanceof RedditChallenge) return "challenge";
   return null;
 }
@@ -85,6 +92,16 @@ function logPipelineDecision(input: {
   attempt: number;
   decision: "retry" | "failed";
   category: string;
+  failure?: {
+    name: string;
+    message: string;
+    status?: number;
+    retryAfterSeconds?: number;
+    cause?: {
+      name: string;
+      message: string;
+    };
+  };
 }): void {
   console.error({
     event: "pipeline_delivery_failed",
@@ -214,7 +231,16 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
       message.ack();
     }
 
-    async function terminalizeExhaustedRetry(category: string): Promise<boolean> {
+    async function terminalizeExhaustedRetry(
+      category: string,
+      failure?: {
+        name: string;
+        message: string;
+        status?: number;
+        retryAfterSeconds?: number;
+        cause?: { name: string; message: string };
+      },
+    ): Promise<boolean> {
       if (message.attempts <= PIPELINE_MAX_RETRIES) return false;
       await repository.markRunFailed(
         message.body.runId,
@@ -228,6 +254,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         attempt: message.attempts,
         decision: "failed",
         category,
+        failure,
       });
       message.ack();
       return true;
@@ -370,6 +397,67 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         message.retry({ delaySeconds: SUMMARY_CLAIM_RETRY_DELAY_SECONDS });
         return;
       }
+      if (error instanceof RedditRateLimited) {
+        const failure = {
+          name: error.name,
+          message: error.message,
+          retryAfterSeconds: error.retryAfterSeconds,
+        };
+        if (message.attempts <= PIPELINE_MAX_RETRIES) {
+          logPipelineDecision({
+            runId: message.body.runId,
+            stage: message.body.stage,
+            attempt: message.attempts,
+            decision: "retry",
+            category: "rate_limited",
+            failure,
+          });
+          message.retry({
+            delaySeconds: redditRateLimitDelaySeconds(error.retryAfterSeconds),
+          });
+          return;
+        }
+        if (message.body.stage === "comments") {
+          const candidate = await repository.getCandidate(
+            message.body.runId,
+            message.body.itemId,
+          );
+          if (candidate?.status === "selected") {
+            await repository.setCandidateStatus(candidate.id, "failed");
+          }
+          await refreshRunStatus(
+            repository,
+            message.body.runId,
+            current.toISOString(),
+          );
+        } else {
+          try {
+            await recordAccessFailure(
+              repository,
+              "rate_limited",
+              current.toISOString(),
+            );
+          } catch {
+            // Breaker persistence is best effort; the run failure is independent.
+          }
+          await repository.markRunFailed(
+            message.body.runId,
+            "rate_limited",
+            error.message,
+            current.toISOString(),
+          );
+        }
+        logPipelineDecision({
+          runId: message.body.runId,
+          stage: message.body.stage,
+          attempt: message.attempts,
+          decision: "failed",
+          category: "rate_limited",
+          failure,
+        });
+        message.ack();
+        return;
+      }
       const accessCode = accessFailureCode(error);
       if (accessCode !== null) {
         if (message.body.stage === "comments") {
@@ -407,13 +495,22 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         return;
       }
       if (error instanceof RedditTemporaryFailure) {
-        if (await terminalizeExhaustedRetry("reddit_temporary_failure")) return;
+        const failure = {
+          name: error.name,
+          message: error.message,
+          ...(error.status === undefined ? {} : { status: error.status }),
+          ...(error.cause instanceof Error
+            ? { cause: { name: error.cause.name, message: error.cause.message } }
+            : {}),
+        };
+        if (await terminalizeExhaustedRetry("reddit_temporary_failure", failure)) return;
         logPipelineDecision({
           runId: message.body.runId,
           stage: message.body.stage,
           attempt: message.attempts,
           decision: "retry",
           category: "reddit_temporary_failure",
+          failure,
         });
         message.retry({
           delaySeconds: redditRetryDelaySeconds(message.attempts),
@@ -443,12 +540,25 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         errorMessage(error),
         current.toISOString(),
       );
+      const failure = error instanceof Error
+        ? {
+            name: error.name,
+            message: error.message,
+            ...(error.cause instanceof Error
+              ? { cause: { name: error.cause.name, message: error.cause.message } }
+              : {}),
+          }
+        : {
+            name: "UnknownPipelineFailure",
+            message: String(error),
+          };
       logPipelineDecision({
         runId: message.body.runId,
         stage: message.body.stage,
         attempt: message.attempts,
         decision: "failed",
         category: "pipeline_stage_failure",
+        failure,
       });
       message.ack();
     }
