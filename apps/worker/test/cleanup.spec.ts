@@ -1010,7 +1010,6 @@ describe("anonymous access circuit breaker", () => {
   it.each([
     ["unauthorized", new RedditAccessDenied(401)],
     ["forbidden", new RedditAccessDenied(403)],
-    ["rate_limited", new RedditRateLimited(0)],
     ["challenge", new RedditChallenge()],
   ] as const)("records %s as an exact terminal access code", async (code, failure) => {
     const { run } = await repository.createOrGetRun({

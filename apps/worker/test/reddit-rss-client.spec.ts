@@ -22,6 +22,22 @@ function atomResponse(body = hotFixture, init?: ResponseInit): Response {
 }
 
 describe("RssRedditAdapter", () => {
+  it("invokes the fetcher without rebinding its this context", async () => {
+    let receivedThis: unknown = "not-called";
+    const fetcher = function (this: unknown): Promise<Response> {
+      receivedThis = this;
+      if (this !== undefined) {
+        throw new TypeError("Illegal invocation");
+      }
+      return Promise.resolve(atomResponse());
+    };
+    const adapter = new RssRedditAdapter({ fetcher, userAgent });
+
+    await adapter.listTopPosts({ limit: 1, time: "day" });
+
+    expect(receivedThis).toBeUndefined();
+  });
+
   it("requests the fixed hot feed with configured RSS headers", async () => {
     const fetcher = vi.fn(async () => atomResponse());
     const adapter = new RssRedditAdapter({ fetcher, userAgent });

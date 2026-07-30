@@ -6,7 +6,7 @@ import {
 } from "../ai/workers-ai";
 import type { PipelineDeps } from "./discover";
 
-export const PROMPT_VERSION = "v1";
+export const PROMPT_VERSION = "v2";
 export const SUMMARY_CLAIM_LEASE_MS = 10 * 60 * 1_000;
 
 export class SummaryClaimUnavailable extends Error {

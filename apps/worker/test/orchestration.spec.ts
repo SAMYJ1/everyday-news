@@ -6,6 +6,7 @@ import type { Candidate, SourceComment, SourceItem } from "../src/domain";
 import { createWorker, PIPELINE_MAX_RETRIES, RUN_STALE_AFTER_MS } from "../src/index";
 import {
   RedditAccessDenied,
+  RedditRateLimited,
   RedditTemporaryFailure,
   RedditUnexpectedResponse,
 } from "../src/reddit/anonymous-json";
@@ -524,6 +525,40 @@ describe("pipeline orchestration", () => {
 
     expect(queued.retry).toHaveBeenCalledWith({ delaySeconds });
     expect(queued.ack).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [0, 60],
+    [120, 120],
+    [600, 300],
+  ])("retries Reddit rate limits with a bounded delay (%is -> %is)", async (retryAfter, delaySeconds) => {
+    const pipeline = queue();
+    const { run } = await repository.createOrGetRun({
+      localDate: "2026-07-24",
+      startedAt: now.toISOString(),
+    });
+    const worker = createWorker({
+      reddit: reddit({
+        listTopPosts: async () => {
+          throw new RedditRateLimited(retryAfter);
+        },
+      }),
+      now: () => now,
+    });
+    const queued = message({ stage: "discover", runId: run.id });
+
+    await worker.queue?.(
+      { messages: [queued] } as MessageBatch<never>,
+      environment(pipeline) as never,
+      {} as ExecutionContext,
+    );
+
+    expect(queued.retry).toHaveBeenCalledWith({ delaySeconds });
+    expect(queued.ack).not.toHaveBeenCalled();
+    expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({
+      status: "running",
+      errorCode: null,
+    });
   });
 
   it("marks the run failed instead of retrying after the final delivery", async () => {

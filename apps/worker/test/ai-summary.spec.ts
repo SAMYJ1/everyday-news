@@ -63,6 +63,19 @@ describe("KnowledgeCardSchema", () => {
     expect(() => KnowledgeCardSchema.parse({ ...validCard, commentInsights: ["a", "b", "c", "d"] })).toThrow();
     expect(() => KnowledgeCardSchema.parse({ ...validCard, caveats: ["a", "b", "c", "d"] })).toThrow();
   });
+
+  it("rejects label-only placeholder content", () => {
+    expect(() =>
+      KnowledgeCardSchema.parse({
+        ...validCard,
+        titleZh: "我",
+        oneLineFact: "原帖声称：",
+        whyInteresting: "评论补充：",
+        commentInsights: ["评论补充："],
+        caveats: ["评论观点："],
+      })
+    ).toThrow();
+  });
 });
 
 describe("WorkersAiCardGenerator", () => {
@@ -77,8 +90,9 @@ describe("WorkersAiCardGenerator", () => {
 
     expect(run).toHaveBeenCalledTimes(2);
     const [model, firstInput] = run.mock.calls[0] as [string, Record<string, unknown>];
-    expect(model).toBe("@cf/meta/llama-3.1-8b-instruct-fast");
+    expect(model).toBe("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
     expect(firstInput).toMatchObject({
+      max_tokens: 700,
       temperature: 0.2,
       response_format: { type: "json_schema" }
     });
@@ -105,6 +119,35 @@ describe("WorkersAiCardGenerator", () => {
     await expect(generator.generate({ item, comments })).rejects.toBeInstanceOf(
       InvalidCardResponse,
     );
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it("derives a useful Chinese title when JSON mode truncates titleZh", async () => {
+    const run = vi.fn().mockResolvedValue({
+      response: {
+        ...validCard,
+        titleZh: "咖",
+        oneLineFact: "原帖声称，咖啡可以提供与水类似的补水作用。",
+      },
+    });
+    const generator = new WorkersAiCardGenerator({ run } as unknown as Ai);
+
+    await expect(generator.generate({ item, comments })).resolves.toMatchObject({
+      titleZh: "咖啡可以提供与水类似的补水作用",
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("repairs an empty comment insight list when comments were provided", async () => {
+    const run = vi
+      .fn()
+      .mockResolvedValueOnce({
+        response: { ...validCard, commentInsights: [] },
+      })
+      .mockResolvedValueOnce({ response: validCard });
+    const generator = new WorkersAiCardGenerator({ run } as unknown as Ai);
+
+    await expect(generator.generate({ item, comments })).resolves.toEqual(validCard);
     expect(run).toHaveBeenCalledTimes(2);
   });
 
