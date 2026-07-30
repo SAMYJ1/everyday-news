@@ -45,6 +45,22 @@ export interface AnonymousCollection {
   consecutiveFailures: number;
 }
 
+export interface PublicKnowledgeCard {
+  id: string;
+  status: "draft" | "approved";
+  titleZh: string;
+  oneLineFact: string;
+  whyInteresting: string;
+  commentInsights: string[];
+  caveats: string[];
+  confidenceNote: string;
+  generatedAt: string;
+  titleEn: string | null;
+  redditUrl: string;
+  sourceUrl: string | null;
+  runLocalDate: string;
+}
+
 interface ErrorEnvelope {
   error: { code: string; message: string };
 }
@@ -60,6 +76,19 @@ function apiUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/$/, "")}${path}`;
 }
 
+async function parseResponse<T>(response: Response): Promise<T> {
+  const body: T | ErrorEnvelope = await response.json();
+  if (!response.ok) {
+    const error = body as ErrorEnvelope;
+    throw new ApiError(
+      response.status,
+      error.error?.code ?? "request_failed",
+      error.error?.message ?? "Request failed",
+    );
+  }
+  return body as T;
+}
+
 export function createApiClient(baseUrl: string, getAdminKey: () => string) {
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const response = await fetch(apiUrl(baseUrl, path), {
@@ -70,12 +99,7 @@ export function createApiClient(baseUrl: string, getAdminKey: () => string) {
         ...init.headers,
       },
     });
-    const body: T | ErrorEnvelope = await response.json();
-    if (!response.ok) {
-      const error = body as ErrorEnvelope;
-      throw new ApiError(response.status, error.error?.code ?? "request_failed", error.error?.message ?? "Request failed");
-    }
-    return body as T;
+    return parseResponse<T>(response);
   }
 
   return {
@@ -104,5 +128,24 @@ export function createApiClient(baseUrl: string, getAdminKey: () => string) {
         body: JSON.stringify({ enabled }),
       })
     ).anonymousCollection,
+  };
+}
+
+export function createPublicApiClient(baseUrl: string) {
+  async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const response = await fetch(apiUrl(baseUrl, path), { ...init });
+    return parseResponse<T>(response);
+  }
+
+  return {
+    listDates: async (init?: RequestInit) => (
+      await request<{ dates: string[] }>("/api/public/dates", init)
+    ).dates,
+    listCards: async (date: string, init?: RequestInit) => (
+      await request<{ date: string | null; cards: PublicKnowledgeCard[] }>(
+        `/api/public/cards?date=${encodeURIComponent(date)}`,
+        init,
+      )
+    ),
   };
 }
