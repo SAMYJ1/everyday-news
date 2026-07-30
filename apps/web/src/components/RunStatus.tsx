@@ -18,8 +18,22 @@ const statusLabels = {
   failed: "失败",
 } as const;
 
+export const RUN_STALE_AFTER_MS = 10 * 60 * 1_000;
+
+function isStaleRun(run: FetchRun | null): boolean {
+  if (run?.status !== "queued" && run?.status !== "running") return false;
+  const startedAt = new Date(run.startedAt).getTime();
+  return Number.isFinite(startedAt) &&
+    Date.now() - startedAt >= RUN_STALE_AFTER_MS;
+}
+
+function runStatusLabel(run: FetchRun): string {
+  return isStaleRun(run) ? "运行已超时" : statusLabels[run.status];
+}
+
 export function RunStatus({ run, runHistory, isStarting, onStart, onEnableAnonymous, isEnablingAnonymous, collectorEnabled }: RunStatusProps) {
   const isActive = run?.status === "queued" || run?.status === "running";
+  const isStale = isStaleRun(run);
   const collectorPaused = collectorEnabled === undefined ? run?.errorCode === "anonymous_disabled" : !collectorEnabled;
 
   return (<>
@@ -27,7 +41,7 @@ export function RunStatus({ run, runHistory, isStarting, onStart, onEnableAnonym
       <div className="section-heading">
         <div>
           <p className="eyebrow">最近一次采集</p>
-          <h2 id="run-status-heading">{run ? `${run.localDate} · ${statusLabels[run.status]}` : "尚无运行记录"}</h2>
+          <h2 id="run-status-heading">{run ? `${run.localDate} · ${runStatusLabel(run)}` : "尚无运行记录"}</h2>
         </div>
         <button type="button" className="button button-secondary" onClick={onStart} disabled={isStarting || isActive}>
           {isStarting ? "正在启动…" : "手动运行"}
@@ -51,6 +65,9 @@ export function RunStatus({ run, runHistory, isStarting, onStart, onEnableAnonym
             {isEnablingAnonymous ? "正在恢复…" : "重新启用"}
           </button>}
         </div>
+        {isStale && <p className="run-error" role="status">
+          这次运行已超过十分钟，服务器正在确认最终状态。确认完成前暂时不能再次手动运行。
+        </p>}
         {run.errorMessage && <p className="run-error" role="status">{run.errorMessage}</p>}
       </>}
     </section>
@@ -66,7 +83,7 @@ export function RunStatus({ run, runHistory, isStarting, onStart, onEnableAnonym
         : <ol>
           {runHistory.map((historyRun) => <li key={historyRun.id}>
             <article aria-label={`${historyRun.localDate} 运行记录`}>
-              <h3>{historyRun.localDate} · {statusLabels[historyRun.status]}</h3>
+              <h3>{historyRun.localDate} · {runStatusLabel(historyRun)}</h3>
               <dl className="run-metrics">
                 {[
                   ["发现", historyRun.discoveredCount],
