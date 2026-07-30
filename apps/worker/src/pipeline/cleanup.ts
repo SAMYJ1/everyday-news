@@ -22,6 +22,9 @@ export async function syncSourceState(
   deps: PipelineDeps,
   now: Date,
 ): Promise<{ checked: number; removed: number }> {
+  if (deps.reddit.supportsStateChecks === false) {
+    return { checked: 0, removed: 0 };
+  }
   const checkedAt = now.toISOString();
   const items = await deps.repository.listSourceItemsForCleanup({
     recentSince: new Date(now.getTime() - RECENT_WINDOW_MS).toISOString(),

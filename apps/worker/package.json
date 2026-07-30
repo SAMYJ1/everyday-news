@@ -8,6 +8,7 @@
     "build": "wrangler deploy --dry-run"
   },
   "dependencies": {
+    "fast-xml-parser": "^5.10.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

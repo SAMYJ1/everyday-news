@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Today I Learned (TIL)</title>
+  <entry>
+    <author>
+      <name>/u/researcher</name>
+      <uri>https://www.reddit.com/user/researcher</uri>
+    </author>
+    <content type="html">&amp;#32; submitted by &amp;#32; &lt;a href=&quot;https://www.reddit.com/user/researcher&quot;&gt;/u/researcher&lt;/a&gt; &lt;br/&gt; &lt;span&gt;&lt;a href=&quot;https://example.org/article?one=1&amp;amp;two=2&quot;&gt;[link]&lt;/a&gt;&lt;/span&gt; &lt;span&gt;&lt;a href=&quot;https://www.reddit.com/r/todayilearned/comments/abc123/example/&quot;&gt;[comments]&lt;/a&gt;&lt;/span&gt;</content>
+    <id>t3_abc123</id>
+    <link href="https://www.reddit.com/r/todayilearned/comments/abc123/example/" />
+    <updated>2026-07-30T03:59:37+00:00</updated>
+    <published>2026-07-30T03:59:37+00:00</published>
+    <title>TIL an example fact &amp; its context</title>
+  </entry>
+  <entry>
+    <author>
+      <name>/u/selfposter</name>
+    </author>
+    <content type="html">&lt;a href=&quot;https://www.reddit.com/r/todayilearned/comments/def456/self_post/&quot;&gt;[comments]&lt;/a&gt;</content>
+    <id>t3_def456</id>
+    <link href="https://www.reddit.com/r/todayilearned/comments/def456/self_post/" />
+    <published>2026-07-30T02:00:00+00:00</published>
+    <title>TIL a self post</title>
+  </entry>
+</feed>

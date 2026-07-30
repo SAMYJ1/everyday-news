@@ -11,13 +11,13 @@ import {
   summarizeCandidate,
 } from "./pipeline/summarize";
 import {
-  AnonymousJsonRedditAdapter,
   RedditAccessDenied,
   RedditChallenge,
   RedditRateLimited,
   RedditTemporaryFailure,
 } from "./reddit/anonymous-json";
 import type { RedditSourceAdapter } from "./reddit/adapter";
+import { RssRedditAdapter } from "./reddit/rss";
 import type { CardGenerator } from "./ai/workers-ai";
 
 const SHANGHAI_TIME_ZONE = "Asia/Shanghai";
@@ -25,6 +25,7 @@ const SUMMARY_CLAIM_RETRY_DELAY_SECONDS = Math.ceil(SUMMARY_CLAIM_LEASE_MS / 1_0
 const RUN_DELIVERY_CLAIM_LEASE_MS = 60_000;
 const REDDIT_RETRY_BASE_DELAY_SECONDS = 30;
 const REDDIT_RETRY_MAX_DELAY_SECONDS = 300;
+const REDDIT_RSS_REQUEST_SPACING_SECONDS = 75;
 export const PIPELINE_MAX_RETRIES = 2;
 export const RUN_STALE_AFTER_MS = 600_000;
 
@@ -149,9 +150,14 @@ function completedSummaryStage(status: string): boolean {
 async function sendPipeline(
   pipeline: Queue<PipelineMessage>,
   body: PipelineMessage,
+  options?: QueueSendOptions,
 ): Promise<void> {
   try {
-    await pipeline.send(body);
+    if (options === undefined) {
+      await pipeline.send(body);
+    } else {
+      await pipeline.send(body, options);
+    }
   } catch (error) {
     throw new PipelineTemporaryFailure("Pipeline queue delivery failed", {
       cause: error,
@@ -179,7 +185,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
   function pipelineDeps(env: Env, repository: Repository): PipelineDeps {
     return {
       repository,
-      reddit: options.reddit ?? new AnonymousJsonRedditAdapter({
+      reddit: options.reddit ?? new RssRedditAdapter({
         fetcher: fetch,
         userAgent: env.REDDIT_USER_AGENT,
       }),
@@ -262,10 +268,14 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
           await repository.markRunRunning(message.body.runId);
           await syncSourceState(deps, current);
           const result = await discoverCandidates(deps, message.body.runId);
-          for (const itemId of result.itemIds) {
+          for (const [index, itemId] of result.itemIds.entries()) {
             await sendPipeline(
               env.PIPELINE,
               { stage: "comments", runId: message.body.runId, itemId },
+              {
+                delaySeconds:
+                  REDDIT_RSS_REQUEST_SPACING_SECONDS * (index + 1),
+              },
             );
           }
           await refreshRunStatus(repository, message.body.runId, current.toISOString());
