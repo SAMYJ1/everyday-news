@@ -38,7 +38,7 @@ Install exactly the locked dependencies and run the fixture-backed checks:
 
 ```sh
 npm ci
-npm run test -w @everyday-news/worker -- reddit-client.spec.ts reddit-parser.spec.ts
+npm run test -w @everyday-news/worker -- reddit-rss-client.spec.ts reddit-rss-parser.spec.ts
 npm test
 npm run typecheck
 npm run build
@@ -58,16 +58,16 @@ read -rs "REDDIT_USER_AGENT?Reddit user agent: "
 printf '\n'
 curl --fail-with-body --silent --show-error \
   --user-agent "$REDDIT_USER_AGENT" \
-  --header 'Accept: application/json' \
-  --output /tmp/everyday-news-reddit-probe.json \
+  --header 'Accept: application/atom+xml, application/rss+xml;q=0.9' \
+  --output /tmp/everyday-news-reddit-probe.atom \
   --write-out 'HTTP %{http_code}; content-type %{content_type}\n' \
-  'https://www.reddit.com/r/todayilearned/top.json?t=day&limit=1&raw_json=1'
-node -e 'const fs=require("node:fs");const value=JSON.parse(fs.readFileSync("/tmp/everyday-news-reddit-probe.json","utf8"));if(value?.kind!=="Listing"||!Array.isArray(value?.data?.children))process.exit(1);console.log("Valid Reddit Listing")'
+  'https://www.reddit.com/r/todayilearned/hot.rss'
+node -e 'const fs=require("node:fs");const value=fs.readFileSync("/tmp/everyday-news-reddit-probe.atom","utf8");if(!value.includes("<feed")||!value.includes("<entry>"))process.exit(1);console.log("Valid Reddit Atom feed")'
 unset REDDIT_USER_AGENT
 ```
 
 This is exactly one request. Stop on `401`, `403`, `429`, HTML, a challenge
-page, or invalid JSON. Do not retry through proxies or alternate identities.
+page, or invalid Atom XML. Do not retry through proxies or alternate identities.
 The response file is temporary and may be deleted after inspection.
 
 ## 2. Authenticate and inspect before creating anything

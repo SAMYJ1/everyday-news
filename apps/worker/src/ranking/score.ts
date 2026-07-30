@@ -88,7 +88,12 @@ export function evaluatePost(item: SourceItem, context: RankingContext): Evaluat
   const discussion = Math.min(30, Math.log10(Math.max(1, item.commentCount)) * 10);
   const freshness = Math.max(0, 20 - ageHours);
   const ratio = item.upvoteRatio == null ? 0 : Math.max(0, (item.upvoteRatio - 0.5) * 20);
-  const score = Math.round((engagement + discussion + freshness + ratio) * 100) / 100;
+  const feedRank = item.sourceRank === undefined
+    ? 0
+    : Math.max(0, 40 - (item.sourceRank - 1) * 2);
+  const score = Math.round(
+    (engagement + discussion + freshness + ratio + feedRank) * 100,
+  ) / 100;
 
   return {
     eligible: true,
@@ -97,7 +102,10 @@ export function evaluatePost(item: SourceItem, context: RankingContext): Evaluat
       `engagement: ${formatScore(engagement)}`,
       `discussion: ${formatScore(discussion)}`,
       `freshness: ${formatScore(freshness)}`,
-      `ratio: ${formatScore(ratio)}`
+      `ratio: ${formatScore(ratio)}`,
+      ...(item.sourceRank === undefined
+        ? []
+        : [`hot_feed_rank: ${item.sourceRank}`]),
     ]
   };
 }

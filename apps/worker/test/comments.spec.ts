@@ -66,7 +66,7 @@ describe("collectComments", () => {
 
     const result = await collectComments(pipelineDeps, "run-1", "t3_post1");
 
-    expect(getPostWithComments).toHaveBeenCalledWith("t3_post1", { limit: 20, depth: 2 });
+    expect(getPostWithComments).toHaveBeenCalledWith("t3_post1", { limit: 100, depth: 2 });
     expect(result).toEqual({ stored: 3 });
     expect(replaceComments).toHaveBeenCalledWith("t3_post1", [
       expect.objectContaining({ id: "t1_comment7", score: 95 }),
@@ -83,5 +83,27 @@ describe("collectComments", () => {
 
     expect(result).toEqual({ stored: 20 });
     expect(replaceComments).toHaveBeenCalledWith("t3_post1", comments.slice(5).reverse());
+  });
+
+  it("ranks RSS comments with unavailable vote scores by information value", async () => {
+    const informative = comment(1, {
+      score: 0,
+      sourceRank: 8,
+      body:
+        "According to the historical research, adoption took several decades. Household equipment was expensive, whereas distribution infrastructure was still developing.",
+    });
+    const joke = comment(2, {
+      score: 0,
+      sourceRank: 1,
+      body: "That is a funny coincidence with enough words to pass the filter.",
+    });
+    const { deps: pipelineDeps, replaceComments } = deps([joke, informative]);
+
+    await collectComments(pipelineDeps, "run-rss", "t3_post1");
+
+    expect(replaceComments).toHaveBeenCalledWith("t3_post1", [
+      informative,
+      joke,
+    ]);
   });
 });

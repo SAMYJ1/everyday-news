@@ -189,8 +189,14 @@ describe("pipeline orchestration", () => {
     await worker.queue?.({ messages: [queued] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
 
     expect(queued.ack).toHaveBeenCalledOnce();
-    expect(pipeline.send).toHaveBeenCalledWith({ stage: "comments", runId: run.id, itemId: "t3_one" });
-    expect(pipeline.send).toHaveBeenCalledWith({ stage: "comments", runId: run.id, itemId: "t3_two" });
+    expect(pipeline.send).toHaveBeenCalledWith(
+      { stage: "comments", runId: run.id, itemId: "t3_one" },
+      { delaySeconds: 75 },
+    );
+    expect(pipeline.send).toHaveBeenCalledWith(
+      { stage: "comments", runId: run.id, itemId: "t3_two" },
+      { delaySeconds: 150 },
+    );
   });
 
   it("emits safe structured events at successful stage boundaries", async () => {
@@ -735,10 +741,13 @@ describe("pipeline orchestration", () => {
       category: "unhandled_message_failure",
     });
     expect(later.ack).toHaveBeenCalledOnce();
-    expect(pipeline.send).toHaveBeenCalledWith({
-      stage: "comments",
-      runId: secondRun.id,
-      itemId: "t3_later",
-    });
+    expect(pipeline.send).toHaveBeenCalledWith(
+      {
+        stage: "comments",
+        runId: secondRun.id,
+        itemId: "t3_later",
+      },
+      { delaySeconds: 75 },
+    );
   });
 });

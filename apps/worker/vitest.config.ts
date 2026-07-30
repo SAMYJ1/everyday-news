@@ -9,7 +9,7 @@ export default defineConfig({
       miniflare: {
         compatibilityDate: "2026-07-23",
         d1Databases: ["DB"],
-      }
+      },
     })
   ]
 });

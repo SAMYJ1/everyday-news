@@ -41,6 +41,7 @@ export interface SourceItem {
   stickied?: boolean;
   over18?: boolean;
   deleted?: boolean;
+  sourceRank?: number;
 }
 
 export interface SourceComment {
@@ -57,6 +58,7 @@ export interface SourceComment {
   fetchedAt: string;
   deletedAt: string | null;
   deleted: boolean;
+  sourceRank?: number;
 }
 
 export interface Candidate {

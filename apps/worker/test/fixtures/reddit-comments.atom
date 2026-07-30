@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example thread</title>
+  <entry>
+    <author><name>/u/researcher</name></author>
+    <content type="html">&lt;a href=&quot;https://example.org/article&quot;&gt;[link]&lt;/a&gt; &lt;a href=&quot;https://www.reddit.com/r/todayilearned/comments/abc123/example/&quot;&gt;[comments]&lt;/a&gt;</content>
+    <id>t3_abc123</id>
+    <link href="https://www.reddit.com/r/todayilearned/comments/abc123/example/" />
+    <published>2026-07-30T03:59:37+00:00</published>
+    <title>TIL an example fact</title>
+  </entry>
+  <entry>
+    <author><name>/u/informative</name></author>
+    <content type="html">&lt;!-- SC_OFF --&gt;&lt;div class=&quot;md&quot;&gt;&lt;p&gt;The technology mattered, but adoption took decades.&lt;/p&gt;&lt;p&gt;According to contemporary research, household equipment and distribution infrastructure were also necessary.&lt;/p&gt;&lt;/div&gt;&lt;!-- SC_ON --&gt;</content>
+    <id>t1_comment1</id>
+    <link href="https://www.reddit.com/r/todayilearned/comments/abc123/example/comment1/" />
+    <updated>2026-07-30T04:10:00+00:00</updated>
+    <title>/u/informative on TIL an example fact</title>
+  </entry>
+  <entry>
+    <author><name>/u/jokester</name></author>
+    <content type="html">&lt;div class=&quot;md&quot;&gt;&lt;p&gt;Nice one &amp;amp; funny.&lt;/p&gt;&lt;/div&gt;</content>
+    <id>t1_comment2</id>
+    <link href="https://www.reddit.com/r/todayilearned/comments/abc123/example/comment2/" />
+    <updated>2026-07-30T04:11:00+00:00</updated>
+    <title>/u/jokester on TIL an example fact</title>
+  </entry>
+</feed>
