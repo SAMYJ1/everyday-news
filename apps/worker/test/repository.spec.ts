@@ -190,12 +190,70 @@ describe("Repository", () => {
     vi.useRealTimers();
   });
 
-  it("prevents two runs for the same local date", async () => {
-    await repository.createRun({ id: "run-1", localDate: "2026-07-23", startedAt: now });
+  it("retains a failed same-day attempt and creates one fresh active attempt", async () => {
+    const first = await repository.createOrGetRun({
+      localDate: "2026-07-23",
+      startedAt: "2026-07-23T00:00:00.000Z",
+    });
+    await repository.markRunFailed(
+      first.run.id,
+      "run_timed_out",
+      "Run timed out",
+      "2026-07-23T00:11:00.000Z",
+    );
 
-    await expect(
-      repository.createRun({ id: "run-2", localDate: "2026-07-23", startedAt: now })
-    ).rejects.toThrow();
+    const second = await repository.createOrGetRun({
+      localDate: "2026-07-23",
+      startedAt: "2026-07-23T00:12:00.000Z",
+    });
+
+    expect(second.created).toBe(true);
+    expect(second.run.id).not.toBe(first.run.id);
+    expect((await repository.listRuns("2026-07-23")).map(({ id }) => id))
+      .toEqual([second.run.id, first.run.id]);
+  });
+
+  it("deduplicates concurrent active attempts for the same local date", async () => {
+    const [first, second] = await Promise.all([
+      repository.createOrGetRun({ localDate: "2026-07-23", startedAt: now }),
+      repository.createOrGetRun({ localDate: "2026-07-23", startedAt: now }),
+    ]);
+
+    expect(first.run.id).toBe(second.run.id);
+    expect([first.created, second.created].filter(Boolean)).toHaveLength(1);
+    expect(await repository.listRuns("2026-07-23")).toHaveLength(1);
+  });
+
+  it("reconciles only stale active runs", async () => {
+    const stale = await repository.createRun({
+      id: "stale",
+      localDate: "2026-07-23",
+      startedAt: "2026-07-23T00:00:00.000Z",
+    });
+    await repository.markRunRunning(stale.id);
+    await repository.createRun({
+      id: "fresh",
+      localDate: "2026-07-24",
+      startedAt: "2026-07-24T00:09:01.000Z",
+    });
+    await repository.createRun({
+      id: "boundary",
+      localDate: "2026-07-25",
+      startedAt: "2026-07-24T00:00:00.000Z",
+    });
+
+    expect(await repository.reconcileStaleRuns(
+      "2026-07-24T00:00:00.000Z",
+      "2026-07-24T00:10:00.000Z",
+    )).toBe(1);
+    expect(await repository.getRunByLocalDate("2026-07-23")).toMatchObject({
+      status: "failed",
+      errorCode: "run_timed_out",
+      errorMessage: "Collection run exceeded the ten-minute execution limit",
+      finishedAt: "2026-07-24T00:10:00.000Z",
+    });
+    expect(await repository.getRunStatus("fresh")).toBe("queued");
+    expect(await repository.getRunStatus("boundary")).toBe("queued");
   });
 
   it("lists the newest runs with failed candidate counts and an exact local-date filter", async () => {
@@ -264,6 +322,91 @@ describe("Repository", () => {
       ),
     ).toBe(true);
     expect(await repository.listCards("rejected")).toHaveLength(1);
+  });
+
+  it("publishes only draft and approved cards from the requested or newest content date", async () => {
+    await repository.createRun({
+      id: "run-old",
+      localDate: "2026-07-23",
+      startedAt: "2026-07-23T00:00:00.000Z",
+    });
+    await repository.createRun({
+      id: "run-new",
+      localDate: "2026-07-24",
+      startedAt: "2026-07-24T00:00:00.000Z",
+    });
+
+    async function savePublicFixture(input: {
+      id: string;
+      runId: string;
+      status: KnowledgeCardRecord["status"];
+      rank: number;
+      generatedAt: string;
+      deletedAt?: string | null;
+    }) {
+      const itemId = `item-${input.id}`;
+      const candidateId = `candidate-${input.id}`;
+      await repository.upsertSourceItem(sourceItem({
+        id: itemId,
+        externalId: `t3_${input.id}`,
+        title: `English ${input.id}`,
+        redditUrl: `https://reddit.test/${input.id}`,
+        sourceUrl: `https://example.test/${input.id}`,
+        deletedAt: input.deletedAt ?? null,
+      }));
+      await repository.saveCandidate(candidate({
+        id: candidateId,
+        runId: input.runId,
+        itemId,
+        rank: input.rank,
+      }));
+      await repository.saveSummary(summary({
+        id: input.id,
+        candidateId,
+        status: input.status,
+        generatedAt: input.generatedAt,
+      }));
+    }
+
+    await savePublicFixture({
+      id: "old-approved",
+      runId: "run-old",
+      status: "approved",
+      rank: 1,
+      generatedAt: "2026-07-23T01:00:00.000Z",
+    });
+    for (const [rank, status] of [
+      [1, "draft"],
+      [2, "approved"],
+      [3, "rejected"],
+      [4, "failed"],
+      [5, "source_deleted"],
+    ] as const) {
+      await savePublicFixture({
+        id: `${status}-card`,
+        runId: "run-new",
+        status,
+        rank,
+        generatedAt: `2026-07-24T0${rank}:00:00.000Z`,
+      });
+    }
+    await savePublicFixture({
+      id: "deleted-source-card",
+      runId: "run-new",
+      status: "draft",
+      rank: 6,
+      generatedAt: "2026-07-24T06:00:00.000Z",
+      deletedAt: "2026-07-24T07:00:00.000Z",
+    });
+
+    expect(await repository.listPublicDates()).toEqual(["2026-07-24", "2026-07-23"]);
+    expect((await repository.listPublicCards()).map(({ id }) => id)).toEqual([
+      "approved-card",
+      "draft-card",
+    ]);
+    expect((await repository.listPublicCards("2026-07-23")).map(({ id }) => id)).toEqual([
+      "old-approved",
+    ]);
   });
 
   it("lists cards with their original title and source links", async () => {

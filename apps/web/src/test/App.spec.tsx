@@ -402,6 +402,63 @@ describe("App", () => {
     await waitFor(() => expect(button).toBeDisabled());
   });
 
+  it("presents an eleven-minute active run as timed out while the server reconciles it", async () => {
+    const current = new Date("2026-07-24T00:30:00.000Z");
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(current);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) {
+        return response({ run: runRecord({
+          status: "running",
+          startedAt: new Date(current.getTime() - 11 * 60 * 1_000).toISOString(),
+          finishedAt: null,
+        }) });
+      }
+      if (url.endsWith("/api/runs")) return response({ runs: [] });
+      if (url.includes("/api/cards?status=draft")) return response({ cards: [] });
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    expect(await screen.findByRole("heading", {
+      name: "2026-07-24 · 运行已超时",
+    })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("服务器正在确认最终状态");
+    expect(screen.getByRole("button", { name: "手动运行" })).toBeDisabled();
+    expect(screen.queryByRole("heading", {
+      name: "2026-07-24 · 运行中",
+    })).not.toBeInTheDocument();
+  });
+
+  it("keeps a run at exactly ten minutes in the active presentation", async () => {
+    const current = new Date("2026-07-24T00:30:00.000Z");
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(current);
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runs/latest")) {
+        return response({ run: runRecord({
+          status: "running",
+          startedAt: new Date(current.getTime() - 10 * 60 * 1_000).toISOString(),
+          finishedAt: null,
+        }) });
+      }
+      if (url.endsWith("/api/runs")) return response({ runs: [] });
+      if (url.includes("/api/cards?status=draft")) return response({ cards: [] });
+      return response({ error: { code: "not_found", message: "Missing fixture" } }, 404);
+    }));
+
+    render(<App apiBaseUrl="https://api.example.test" initialAccessKey="secret-key" />);
+
+    expect(await screen.findByRole("heading", {
+      name: "2026-07-24 · 运行中",
+    })).toBeInTheDocument();
+    expect(screen.queryByText("服务器正在确认最终状态")).not.toBeInTheDocument();
+  });
+
   it("clears a rejected access key and returns to the gate with an error", async () => {
     sessionStorage.setItem("everyday-news-admin-key", "expired-key");
     vi.stubGlobal("fetch", vi.fn(async () => response({
@@ -537,7 +594,9 @@ describe("App", () => {
         return response({ run: {
           id, localDate: "2026-07-24", status,
           discoveredCount: 20, selectedCount: 5, summarizedCount: status === "completed" ? 5 : 3,
-          errorCode: null, errorMessage: null, startedAt: "2026-07-24T00:00:00.000Z",
+          errorCode: null,
+          errorMessage: null,
+          startedAt: status === "running" ? new Date().toISOString() : "2026-07-24T00:00:00.000Z",
           finishedAt: status === "completed" ? "2026-07-24T00:01:00.000Z" : null,
         } });
       }

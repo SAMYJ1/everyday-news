@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Repository } from "../src/db/repository";
 import { InvalidCardResponse } from "../src/ai/workers-ai";
 import type { Candidate, KnowledgeCardRecord, SourceItem } from "../src/domain";
-import { createWorker } from "../src/index";
+import { createWorker, RUN_STALE_AFTER_MS } from "../src/index";
 import { applyMigrations } from "./apply-migrations";
 
 const now = new Date("2026-07-24T00:30:00.000Z");
@@ -133,6 +133,58 @@ describe("protected HTTP API", () => {
     }
   });
 
+  it("serves a narrow public card feed without authorization", async () => {
+    await seedCard(repository);
+
+    const datesResponse = await request("/api/public/dates");
+    expect(datesResponse.status).toBe(200);
+    expect(await datesResponse.json()).toEqual({ dates: ["2026-07-24"] });
+
+    const cardsResponse = await request("/api/public/cards");
+    expect(cardsResponse.status).toBe(200);
+    const body = await cardsResponse.json() as {
+      date: string | null;
+      cards: Array<Record<string, unknown>>;
+    };
+    expect(body.date).toBe("2026-07-24");
+    expect(body.cards).toEqual([
+      expect.objectContaining({
+        id: "summary-1",
+        status: "draft",
+        titleZh: "中文标题",
+        runLocalDate: "2026-07-24",
+      }),
+    ]);
+    for (const privateField of [
+      "candidateId",
+      "model",
+      "promptVersion",
+      "inputHash",
+      "reviewedAt",
+      "candidateScore",
+      "selectionReasons",
+      "warnings",
+    ]) {
+      expect(body.cards[0]).not.toHaveProperty(privateField);
+    }
+  });
+
+  it("returns an empty public feed and validates public date filters", async () => {
+    expect(await (await request("/api/public/cards")).json()).toEqual({
+      date: null,
+      cards: [],
+    });
+
+    const invalid = await request("/api/public/cards?date=2026-02-30");
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({
+      error: {
+        code: "invalid_date",
+        message: "Date must be a valid YYYY-MM-DD",
+      },
+    });
+  });
+
   it("returns JSON and only echoes the configured origin for authenticated requests and preflight", async () => {
     const response = await request("/api/runs/latest", { headers: authorizedHeaders() });
     expect(response.status).toBe(200);
@@ -153,6 +205,28 @@ describe("protected HTTP API", () => {
     });
     expect(foreignPreflight.status).toBe(403);
     expect(await foreignPreflight.json()).toEqual({ error: { code: "forbidden_origin", message: "Forbidden origin" } });
+  });
+
+  it("reconciles stale active runs before returning the latest run", async () => {
+    await repository.createRun({
+      id: "stale-run",
+      localDate: "2026-07-23",
+      startedAt: new Date(now.getTime() - RUN_STALE_AFTER_MS - 60_000).toISOString(),
+    });
+    await repository.markRunRunning("stale-run");
+    await repository.createRun({
+      id: "fresh-run",
+      localDate: "2026-07-24",
+      startedAt: new Date(now.getTime() - RUN_STALE_AFTER_MS + 60_000).toISOString(),
+    });
+
+    const response = await request("/api/runs/latest", {
+      headers: authorizedHeaders(),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await repository.getRunStatus("stale-run")).toBe("failed");
+    expect(await repository.getRunStatus("fresh-run")).toBe("queued");
   });
 
   it("lists runs and cards for an exact Shanghai local date", async () => {

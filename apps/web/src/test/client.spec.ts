@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, createApiClient } from "../api/client";
+import { ApiError, createApiClient, createPublicApiClient } from "../api/client";
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -38,6 +38,20 @@ describe("createApiClient", () => {
         method: "POST",
         body: JSON.stringify({ enabled: true }),
         headers: expect.objectContaining({ "Content-Type": "application/json" }),
+      }),
+    );
+  });
+
+  it("loads public cards without an authorization header and encodes the date", async () => {
+    const fetchMock = vi.fn(async () => response({ date: "2026-07-24", cards: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createPublicApiClient("https://api.example.test/").listCards("2026-07-24 /");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/api/public/cards?date=2026-07-24%20%2F",
+      expect.not.objectContaining({
+        headers: expect.objectContaining({ Authorization: expect.anything() }),
       }),
     );
   });

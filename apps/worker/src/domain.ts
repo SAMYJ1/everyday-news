@@ -98,6 +98,22 @@ export interface KnowledgeCard extends KnowledgeCardRecord {
   runLocalDate: string;
 }
 
+export interface PublicKnowledgeCard {
+  id: string;
+  status: Extract<SummaryStatus, "draft" | "approved">;
+  titleZh: string;
+  oneLineFact: string;
+  whyInteresting: string;
+  commentInsights: string[];
+  caveats: string[];
+  confidenceNote: string;
+  generatedAt: string;
+  titleEn: string | null;
+  redditUrl: string;
+  sourceUrl: string | null;
+  runLocalDate: string;
+}
+
 export interface AnonymousCollection {
   enabled: boolean;
   consecutiveFailures: number;

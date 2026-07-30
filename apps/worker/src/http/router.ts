@@ -11,6 +11,7 @@ export interface RouterDeps {
   env: Env;
   repository: Repository;
   now: Date;
+  runStaleAfterMs: number;
   startManualRun: () => Promise<{ id: string }>;
 }
 
@@ -79,6 +80,30 @@ export async function routeRequest(request: Request, deps: RouterDeps): Promise<
     return json(request, env, { ok: true, service: "everyday-news-api", version: 1 });
   }
 
+  if (request.method === "GET" && url.pathname === "/api/public/dates") {
+    try {
+      return json(request, env, { dates: await repository.listPublicDates() });
+    } catch {
+      return error(request, env, 500, "internal_error", "Internal server error");
+    }
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/public/cards") {
+    const requestedDate = url.searchParams.get("date");
+    if (requestedDate !== null && !isValidLocalDate(requestedDate)) {
+      return error(request, env, 400, "invalid_date", "Date must be a valid YYYY-MM-DD");
+    }
+    try {
+      const date = requestedDate ?? (await repository.listPublicDates())[0] ?? null;
+      return json(request, env, {
+        date,
+        cards: date === null ? [] : await repository.listPublicCards(date),
+      });
+    } catch {
+      return error(request, env, 500, "internal_error", "Internal server error");
+    }
+  }
+
   if (!isAuthorized(request, env)) {
     return error(request, env, 401, "unauthorized", "Unauthorized");
   }
@@ -89,6 +114,10 @@ export async function routeRequest(request: Request, deps: RouterDeps): Promise<
 
   try {
     if (request.method === "GET" && url.pathname === "/api/runs/latest") {
+      await repository.reconcileStaleRuns(
+        new Date(deps.now.getTime() - deps.runStaleAfterMs).toISOString(),
+        deps.now.toISOString(),
+      );
       return json(request, env, { run: await repository.getLatestRun() });
     }
 

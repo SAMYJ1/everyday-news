@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkersAiTemporaryFailure } from "../src/ai/workers-ai";
 import { Repository } from "../src/db/repository";
 import type { Candidate, SourceComment, SourceItem } from "../src/domain";
-import { createWorker } from "../src/index";
+import { createWorker, PIPELINE_MAX_RETRIES, RUN_STALE_AFTER_MS } from "../src/index";
 import {
   RedditAccessDenied,
   RedditTemporaryFailure,
@@ -119,6 +119,7 @@ describe("pipeline orchestration", () => {
   let repository: Repository;
 
   beforeEach(async () => {
+    vi.restoreAllMocks();
     await applyMigrations();
     await clearDatabase();
     repository = new Repository(env.DB);
@@ -135,6 +136,28 @@ describe("pipeline orchestration", () => {
     expect(run).toMatchObject({ localDate: "2026-07-24", status: "running" });
     expect(pipeline.send).toHaveBeenCalledTimes(1);
     expect(pipeline.send).toHaveBeenCalledWith({ stage: "discover", runId: run?.id });
+  });
+
+  it("expires a stale same-day attempt before scheduling a replacement", async () => {
+    await repository.createRun({
+      id: "stale-run",
+      localDate: "2026-07-24",
+      startedAt: new Date(now.getTime() - RUN_STALE_AFTER_MS - 1).toISOString(),
+    });
+    await repository.markRunRunning("stale-run");
+    const pipeline = queue();
+    const worker = createWorker({ reddit: reddit(), now: () => now });
+
+    await worker.scheduled?.({} as ScheduledEvent, environment(pipeline) as never, {} as ExecutionContext);
+
+    const runs = await repository.listRuns("2026-07-24");
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).toMatchObject({ status: "running" });
+    expect(runs[1]).toMatchObject({
+      id: "stale-run",
+      status: "failed",
+      errorCode: "run_timed_out",
+    });
   });
 
   it("re-enqueues a same-date queued run after schedule delivery fails", async () => {
@@ -168,6 +191,40 @@ describe("pipeline orchestration", () => {
     expect(queued.ack).toHaveBeenCalledOnce();
     expect(pipeline.send).toHaveBeenCalledWith({ stage: "comments", runId: run.id, itemId: "t3_one" });
     expect(pipeline.send).toHaveBeenCalledWith({ stage: "comments", runId: run.id, itemId: "t3_two" });
+  });
+
+  it("emits safe structured events at successful stage boundaries", async () => {
+    const pipeline = queue();
+    const { run } = await repository.createOrGetRun({
+      localDate: "2026-07-24",
+      startedAt: now.toISOString(),
+    });
+    const logged = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const worker = createWorker({ reddit: reddit(), now: () => now });
+    const queued = message({ stage: "discover", runId: run.id });
+
+    await worker.queue?.(
+      { messages: [queued] } as MessageBatch<never>,
+      environment(pipeline) as never,
+      {} as ExecutionContext,
+    );
+
+    expect(logged).toHaveBeenCalledWith({
+      event: "pipeline_stage_boundary",
+      runId: run.id,
+      stage: "discover",
+      attempt: 1,
+      category: "stage",
+      decision: "started",
+    });
+    expect(logged).toHaveBeenCalledWith({
+      event: "pipeline_stage_boundary",
+      runId: run.id,
+      stage: "discover",
+      attempt: 1,
+      category: "stage",
+      decision: "completed",
+    });
   });
 
   it("replays every discovery fan-out message after a partial queue delivery", async () => {
@@ -463,6 +520,70 @@ describe("pipeline orchestration", () => {
     expect(queued.ack).not.toHaveBeenCalled();
   });
 
+  it("marks the run failed instead of retrying after the final delivery", async () => {
+    const pipeline = queue();
+    const { run } = await repository.createOrGetRun({
+      localDate: "2026-07-24",
+      startedAt: now.toISOString(),
+    });
+    const queued = message(
+      { stage: "discover", runId: run.id },
+      PIPELINE_MAX_RETRIES + 1,
+    );
+    const worker = createWorker({
+      reddit: reddit({
+        listTopPosts: async () => {
+          throw new RedditTemporaryFailure("Reddit unavailable");
+        },
+      }),
+      now: () => now,
+    });
+
+    await worker.queue?.(
+      { messages: [queued] } as MessageBatch<never>,
+      environment(pipeline) as never,
+      {} as ExecutionContext,
+    );
+
+    expect(queued.retry).not.toHaveBeenCalled();
+    expect(queued.ack).toHaveBeenCalledOnce();
+    expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({
+      status: "failed",
+      errorCode: "pipeline_discover_retries_exhausted",
+      finishedAt: now.toISOString(),
+    });
+  });
+
+  it("retries an exception that escapes per-message recovery", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const queued = {
+      attempts: 1,
+      ack: vi.fn(),
+      retry: vi.fn(),
+    } as Record<string, unknown>;
+    Object.defineProperty(queued, "body", {
+      get() {
+        throw new Error("corrupt queue envelope");
+      },
+    });
+    const worker = createWorker({ now: () => now });
+
+    await worker.queue?.(
+      { messages: [queued] } as MessageBatch<never>,
+      environment(queue()) as never,
+      {} as ExecutionContext,
+    );
+
+    expect(queued.retry).toHaveBeenCalledOnce();
+    expect(queued.ack).not.toHaveBeenCalled();
+    expect(logged).toHaveBeenCalledWith({
+      event: "pipeline_delivery_failed",
+      attempt: 1,
+      decision: "retry",
+      category: "invalid_queue_envelope",
+    });
+  });
+
   it("preserves the default retry behavior for Workers AI temporary failures", async () => {
     const pipeline = queue();
     const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
@@ -563,7 +684,7 @@ describe("pipeline orchestration", () => {
     expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({ status: "failed", errorCode });
   });
 
-  it("acknowledges access denial even when persisting the failed run throws", async () => {
+  it("retries access denial when persisting the failed run throws", async () => {
     const pipeline = queue();
     const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
     vi.spyOn(Repository.prototype, "markRunFailed").mockRejectedValueOnce(new Error("D1 unavailable"));
@@ -575,15 +696,15 @@ describe("pipeline orchestration", () => {
 
     await worker.queue?.({ messages: [queued] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
 
-    expect(queued.ack).toHaveBeenCalledOnce();
-    expect(queued.retry).not.toHaveBeenCalled();
+    expect(queued.ack).not.toHaveBeenCalled();
+    expect(queued.retry).toHaveBeenCalledOnce();
     expect(await repository.getAnonymousCollection()).toEqual({
       enabled: true,
       consecutiveFailures: 1,
     });
   });
 
-  it("acknowledges an unknown recovery-write failure and continues to later messages", async () => {
+  it("retries an unknown recovery-write failure and continues to later messages", async () => {
     const pipeline = queue();
     const firstRun = (await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() })).run;
     const secondRun = (await repository.createOrGetRun({ localDate: "2026-07-25", startedAt: now.toISOString() })).run;
@@ -596,14 +717,23 @@ describe("pipeline orchestration", () => {
       },
     });
     vi.spyOn(Repository.prototype, "markRunPartial").mockRejectedValueOnce(new Error("D1 unavailable"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const worker = createWorker({ reddit: redditAdapter, now: () => now });
     const first = message({ stage: "discover", runId: firstRun.id });
     const later = message({ stage: "discover", runId: secondRun.id });
 
     await worker.queue?.({ messages: [first, later] } as MessageBatch<never>, environment(pipeline) as never, {} as ExecutionContext);
 
-    expect(first.ack).toHaveBeenCalledOnce();
-    expect(first.retry).not.toHaveBeenCalled();
+    expect(first.ack).not.toHaveBeenCalled();
+    expect(first.retry).toHaveBeenCalledOnce();
+    expect(logged).toHaveBeenCalledWith({
+      event: "pipeline_delivery_failed",
+      runId: firstRun.id,
+      stage: "discover",
+      attempt: 1,
+      decision: "retry",
+      category: "unhandled_message_failure",
+    });
     expect(later.ack).toHaveBeenCalledOnce();
     expect(pipeline.send).toHaveBeenCalledWith({
       stage: "comments",

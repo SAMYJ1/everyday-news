@@ -23,9 +23,10 @@ import type { CardGenerator } from "./ai/workers-ai";
 const SHANGHAI_TIME_ZONE = "Asia/Shanghai";
 const SUMMARY_CLAIM_RETRY_DELAY_SECONDS = Math.ceil(SUMMARY_CLAIM_LEASE_MS / 1_000);
 const RUN_DELIVERY_CLAIM_LEASE_MS = 60_000;
-// Reddit transport retries use the delivery attempt number: 30s, 60s, 120s, 240s, then 300s.
 const REDDIT_RETRY_BASE_DELAY_SECONDS = 30;
 const REDDIT_RETRY_MAX_DELAY_SECONDS = 300;
+export const PIPELINE_MAX_RETRIES = 2;
+export const RUN_STALE_AFTER_MS = 600_000;
 
 export class PipelineTemporaryFailure extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -77,6 +78,32 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown pipeline error";
 }
 
+function logPipelineDecision(input: {
+  runId: string;
+  stage: PipelineMessage["stage"];
+  attempt: number;
+  decision: "retry" | "failed";
+  category: string;
+}): void {
+  console.error({
+    event: "pipeline_delivery_failed",
+    ...input,
+  });
+}
+
+function logPipelineBoundary(input: {
+  runId: string;
+  stage: PipelineMessage["stage"];
+  attempt: number;
+  decision: "started" | "completed";
+}): void {
+  console.log({
+    event: "pipeline_stage_boundary",
+    ...input,
+    category: "stage",
+  });
+}
+
 export async function startRun(
   repository: Repository,
   pipeline: Queue<PipelineMessage>,
@@ -84,6 +111,10 @@ export async function startRun(
   _trigger: "scheduled" | "manual",
   now: Date,
 ) {
+  await repository.reconcileStaleRuns(
+    new Date(now.getTime() - RUN_STALE_AFTER_MS).toISOString(),
+    now.toISOString(),
+  );
   const result = await repository.createOrGetRun({
     localDate,
     startedAt: now.toISOString(),
@@ -167,11 +198,47 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
     const deps = pipelineDeps(env, repository);
     const current = clock();
 
+    function completeStage(): void {
+      logPipelineBoundary({
+        runId: message.body.runId,
+        stage: message.body.stage,
+        attempt: message.attempts,
+        decision: "completed",
+      });
+      message.ack();
+    }
+
+    async function terminalizeExhaustedRetry(category: string): Promise<boolean> {
+      if (message.attempts <= PIPELINE_MAX_RETRIES) return false;
+      await repository.markRunFailed(
+        message.body.runId,
+        `pipeline_${message.body.stage}_retries_exhausted`,
+        "Collection stage exhausted its delivery retries",
+        current.toISOString(),
+      );
+      logPipelineDecision({
+        runId: message.body.runId,
+        stage: message.body.stage,
+        attempt: message.attempts,
+        decision: "failed",
+        category,
+      });
+      message.ack();
+      return true;
+    }
+
+    logPipelineBoundary({
+      runId: message.body.runId,
+      stage: message.body.stage,
+      attempt: message.attempts,
+      decision: "started",
+    });
+
     try {
       switch (message.body.stage) {
         case "discover": {
           if (await repository.getRunStatus(message.body.runId) === "failed") {
-            message.ack();
+            completeStage();
             return;
           }
           const anonymous = await repository.getAnonymousCollection();
@@ -182,6 +249,13 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
               "Anonymous Reddit collection is disabled",
               current.toISOString(),
             );
+            logPipelineDecision({
+              runId: message.body.runId,
+              stage: message.body.stage,
+              attempt: message.attempts,
+              decision: "failed",
+              category: "anonymous_disabled",
+            });
             message.ack();
             return;
           }
@@ -195,31 +269,31 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             );
           }
           await refreshRunStatus(repository, message.body.runId, current.toISOString());
-          message.ack();
+          completeStage();
           return;
         }
         case "comments": {
           const runFailed = await repository.getRunStatus(message.body.runId) === "failed";
           const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
           if (candidate === null) {
-            message.ack();
+            completeStage();
             return;
           }
           if (candidate.status === "comments_ready") {
             await sendPipeline(env.PIPELINE, { ...message.body, stage: "summarize" });
-            message.ack();
+            completeStage();
             return;
           }
           if (completedCommentsStage(candidate.status)) {
             if (completedSummaryStage(candidate.status)) {
               await refreshRunStatus(repository, message.body.runId, current.toISOString());
             }
-            message.ack();
+            completeStage();
             return;
           }
           if (runFailed) {
             await repository.setCandidateStatus(candidate.id, "failed");
-            message.ack();
+            completeStage();
             return;
           }
           const anonymous = await repository.getAnonymousCollection();
@@ -231,19 +305,26 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
               "Anonymous Reddit collection is disabled",
               current.toISOString(),
             );
+            logPipelineDecision({
+              runId: message.body.runId,
+              stage: message.body.stage,
+              attempt: message.attempts,
+              decision: "failed",
+              category: "anonymous_disabled",
+            });
             message.ack();
             return;
           }
           await collectComments(deps, message.body.runId, message.body.itemId);
           await repository.setCandidateStatus(candidate.id, "comments_ready");
           await sendPipeline(env.PIPELINE, { ...message.body, stage: "summarize" });
-          message.ack();
+          completeStage();
           return;
         }
         case "summarize": {
           const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
           if (candidate === null) {
-            message.ack();
+            completeStage();
             return;
           }
           if (
@@ -252,7 +333,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             await repository.getActiveCardRegeneration(candidate.id) === null
           ) {
             await refreshRunStatus(repository, message.body.runId, current.toISOString());
-            message.ack();
+            completeStage();
             return;
           }
           await summarizeCandidate(
@@ -262,12 +343,20 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
             message.body.regeneration,
           );
           await refreshRunStatus(repository, message.body.runId, current.toISOString());
-          message.ack();
+          completeStage();
           return;
         }
       }
     } catch (error) {
       if (error instanceof SummaryClaimUnavailable) {
+        if (await terminalizeExhaustedRetry("summary_claim_unavailable")) return;
+        logPipelineDecision({
+          runId: message.body.runId,
+          stage: message.body.stage,
+          attempt: message.attempts,
+          decision: "retry",
+          category: "summary_claim_unavailable",
+        });
         message.retry({ delaySeconds: SUMMARY_CLAIM_RETRY_DELAY_SECONDS });
         return;
       }
@@ -291,44 +380,66 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         } catch {
           // Breaker persistence is best effort; the run failure is independent.
         }
-        try {
-          await repository.markRunFailed(
-            message.body.runId,
-            accessCode,
-            errorMessage(error),
-            current.toISOString(),
-          );
-        } catch {
-          // Access denial is terminal even when its run failure cannot be persisted.
-        }
+        await repository.markRunFailed(
+          message.body.runId,
+          accessCode,
+          errorMessage(error),
+          current.toISOString(),
+        );
+        logPipelineDecision({
+          runId: message.body.runId,
+          stage: message.body.stage,
+          attempt: message.attempts,
+          decision: "failed",
+          category: accessCode,
+        });
         message.ack();
         return;
       }
       if (error instanceof RedditTemporaryFailure) {
+        if (await terminalizeExhaustedRetry("reddit_temporary_failure")) return;
+        logPipelineDecision({
+          runId: message.body.runId,
+          stage: message.body.stage,
+          attempt: message.attempts,
+          decision: "retry",
+          category: "reddit_temporary_failure",
+        });
         message.retry({
           delaySeconds: redditRetryDelaySeconds(message.attempts),
         });
         return;
       }
       if (isTemporaryFailure(error)) {
+        if (await terminalizeExhaustedRetry("pipeline_temporary_failure")) return;
+        logPipelineDecision({
+          runId: message.body.runId,
+          stage: message.body.stage,
+          attempt: message.attempts,
+          decision: "retry",
+          category: "pipeline_temporary_failure",
+        });
         message.retry();
         return;
       }
 
-      try {
-        if (message.body.stage !== "discover") {
-          const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
-          if (candidate !== null) await repository.setCandidateStatus(candidate.id, "failed");
-        }
-        await repository.markRunPartial(
-          message.body.runId,
-          `pipeline_${message.body.stage}_failed`,
-          errorMessage(error),
-          current.toISOString(),
-        );
-      } catch {
-        // Unknown recovery-write failures are terminal for this delivery.
+      if (message.body.stage !== "discover") {
+        const candidate = await repository.getCandidate(message.body.runId, message.body.itemId);
+        if (candidate !== null) await repository.setCandidateStatus(candidate.id, "failed");
       }
+      await repository.markRunPartial(
+        message.body.runId,
+        `pipeline_${message.body.stage}_failed`,
+        errorMessage(error),
+        current.toISOString(),
+      );
+      logPipelineDecision({
+        runId: message.body.runId,
+        stage: message.body.stage,
+        attempt: message.attempts,
+        decision: "failed",
+        category: "pipeline_stage_failure",
+      });
       message.ack();
     }
   }
@@ -339,6 +450,7 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         env,
         repository: new Repository(env.DB),
         now: clock(),
+        runStaleAfterMs: RUN_STALE_AFTER_MS,
         startManualRun: () => {
           const now = clock();
           return startRun(
@@ -367,7 +479,23 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         try {
           await processMessage(message, env, repository);
         } catch {
-          message.ack();
+          try {
+            logPipelineDecision({
+              runId: message.body.runId,
+              stage: message.body.stage,
+              attempt: message.attempts,
+              decision: "retry",
+              category: "unhandled_message_failure",
+            });
+          } catch {
+            console.error({
+              event: "pipeline_delivery_failed",
+              attempt: message.attempts,
+              decision: "retry",
+              category: "invalid_queue_envelope",
+            });
+          }
+          message.retry();
         }
       }
     },

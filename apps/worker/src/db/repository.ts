@@ -4,6 +4,7 @@ import type {
   FetchRun,
   KnowledgeCard,
   KnowledgeCardRecord,
+  PublicKnowledgeCard,
   SourceComment,
   SourceItem,
   SummaryStatus
@@ -49,6 +50,22 @@ interface SummaryRow {
   selection_reasons: string;
   comment_links: string;
   warnings: string;
+  run_local_date: string;
+}
+
+interface PublicSummaryRow {
+  id: string;
+  status: PublicKnowledgeCard["status"];
+  title_zh: string;
+  one_line_fact: string;
+  why_interesting: string;
+  comment_insights: string;
+  caveats: string;
+  confidence_note: string;
+  generated_at: string;
+  title_en: string | null;
+  reddit_url: string;
+  source_url: string | null;
   run_local_date: string;
 }
 
@@ -159,6 +176,24 @@ function toSummaryRecord(row: Omit<SummaryRow, "title_en" | "reddit_url" | "sour
   };
 }
 
+function toPublicSummary(row: PublicSummaryRow): PublicKnowledgeCard {
+  return {
+    id: row.id,
+    status: row.status,
+    titleZh: row.title_zh,
+    oneLineFact: row.one_line_fact,
+    whyInteresting: row.why_interesting,
+    commentInsights: JSON.parse(row.comment_insights) as string[],
+    caveats: JSON.parse(row.caveats) as string[],
+    confidenceNote: row.confidence_note,
+    generatedAt: row.generated_at,
+    titleEn: row.title_en,
+    redditUrl: row.reddit_url,
+    sourceUrl: row.source_url,
+    runLocalDate: row.run_local_date,
+  };
+}
+
 export class Repository {
   constructor(private readonly db: D1Database) {}
 
@@ -170,7 +205,10 @@ export class Repository {
             WHERE candidates.run_id = fetch_runs.id AND candidates.status = 'failed'
           ) AS failed_count,
           error_code, error_message, started_at, finished_at
-        FROM fetch_runs WHERE local_date = ?`,
+        FROM fetch_runs
+        WHERE local_date = ?
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1`,
       )
       .bind(localDate)
       .first<FetchRunRow>();
@@ -188,11 +226,27 @@ export class Repository {
           id, local_date, status, discovered_count, selected_count, summarized_count,
           error_code, error_message, started_at, finished_at
         ) VALUES (?, ?, 'queued', 0, 0, 0, NULL, NULL, ?, NULL)
-        ON CONFLICT(local_date) DO NOTHING`,
+        ON CONFLICT DO NOTHING`,
       )
       .bind(id, input.localDate, input.startedAt)
       .run();
-    const run = await this.getRunByLocalDate(input.localDate);
+    const row = await this.db
+      .prepare(
+        `SELECT id, local_date, status, discovered_count, selected_count, summarized_count,
+          (SELECT COUNT(*) FROM candidates
+            WHERE candidates.run_id = fetch_runs.id AND candidates.status = 'failed'
+          ) AS failed_count,
+          error_code, error_message, started_at, finished_at
+        FROM fetch_runs
+        WHERE id = ? OR (
+          local_date = ? AND status IN ('queued', 'running')
+        )
+        ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, started_at DESC, id DESC
+        LIMIT 1`,
+      )
+      .bind(id, input.localDate, id)
+      .first<FetchRunRow>();
+    const run = row === null ? null : toFetchRun(row);
     if (run === null) throw new Error(`Unable to create or load run for ${input.localDate}`);
     return { run, created: (result.meta.changes ?? 0) === 1 };
   }
@@ -287,6 +341,24 @@ export class Repository {
       )
       .bind(errorCode, errorMessage, finishedAt, runId)
       .run();
+  }
+
+  async reconcileStaleRuns(staleBefore: string, finishedAt: string): Promise<number> {
+    const result = await this.db
+      .prepare(
+        `UPDATE fetch_runs
+        SET status = 'failed',
+          error_code = 'run_timed_out',
+          error_message = 'Collection run exceeded the ten-minute execution limit',
+          finished_at = ?,
+          discovery_claim_token = NULL,
+          discovery_claimed_at = NULL
+        WHERE status IN ('queued', 'running')
+          AND unixepoch(started_at) < unixepoch(?)`,
+      )
+      .bind(finishedAt, staleBefore)
+      .run();
+    return result.meta.changes ?? 0;
   }
 
   async markRunPartial(
@@ -954,7 +1026,7 @@ export class Repository {
           ) AS failed_count,
           error_code, error_message, started_at, finished_at
         FROM fetch_runs
-        ORDER BY local_date DESC, started_at DESC
+        ORDER BY local_date DESC, started_at DESC, id DESC
         LIMIT 1`
       )
       .first<FetchRunRow>();
@@ -971,7 +1043,7 @@ export class Repository {
             ) AS failed_count,
             error_code, error_message, started_at, finished_at
           FROM fetch_runs
-          ORDER BY local_date DESC, started_at DESC
+          ORDER BY local_date DESC, started_at DESC, id DESC
           LIMIT 30`,
         )
       : this.db.prepare(
@@ -982,11 +1054,53 @@ export class Repository {
             error_code, error_message, started_at, finished_at
           FROM fetch_runs
           WHERE local_date = ?
-          ORDER BY local_date DESC, started_at DESC
+          ORDER BY local_date DESC, started_at DESC, id DESC
           LIMIT 30`,
         ).bind(localDate);
     const result = await statement.all<FetchRunRow>();
     return result.results.map(toFetchRun);
+  }
+
+  async listPublicDates(): Promise<string[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT DISTINCT fetch_runs.local_date
+        FROM summaries
+        JOIN candidates ON candidates.id = summaries.candidate_id
+        JOIN source_items ON source_items.id = candidates.item_id
+        JOIN fetch_runs ON fetch_runs.id = candidates.run_id
+        WHERE summaries.status IN ('draft', 'approved')
+          AND source_items.deleted_at IS NULL
+        ORDER BY fetch_runs.local_date DESC`,
+      )
+      .all<{ local_date: string }>();
+    return result.results.map(({ local_date }) => local_date);
+  }
+
+  async listPublicCards(localDate?: string): Promise<PublicKnowledgeCard[]> {
+    const selectedDate = localDate ?? (await this.listPublicDates())[0];
+    if (selectedDate === undefined) return [];
+
+    const result = await this.db
+      .prepare(
+        `SELECT summaries.id, summaries.status, summaries.title_zh,
+          summaries.one_line_fact, summaries.why_interesting,
+          summaries.comment_insights, summaries.caveats, summaries.confidence_note,
+          summaries.generated_at, source_items.title AS title_en,
+          source_items.reddit_url, source_items.source_url,
+          fetch_runs.local_date AS run_local_date
+        FROM summaries
+        JOIN candidates ON candidates.id = summaries.candidate_id
+        JOIN source_items ON source_items.id = candidates.item_id
+        JOIN fetch_runs ON fetch_runs.id = candidates.run_id
+        WHERE summaries.status IN ('draft', 'approved')
+          AND source_items.deleted_at IS NULL
+          AND fetch_runs.local_date = ?
+        ORDER BY summaries.generated_at DESC, summaries.id DESC`,
+      )
+      .bind(selectedDate)
+      .all<PublicSummaryRow>();
+    return result.results.map(toPublicSummary);
   }
 
   async listCards(status?: SummaryStatus, localDate?: string): Promise<KnowledgeCard[]> {

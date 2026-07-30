@@ -6,7 +6,10 @@ export default defineConfig({
     cloudflareTest({
       main: "./src/index.ts",
       remoteBindings: false,
-      miniflare: { d1Databases: ["DB"] }
+      miniflare: {
+        compatibilityDate: "2026-07-23",
+        d1Databases: ["DB"],
+      }
     })
   ]
 });

@@ -391,6 +391,7 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
           <input id="admin-key" name="admin-key" type="password" autoComplete="off" value={keyInput} onChange={(event) => setKeyInput(event.target.value)} />
           <button type="submit" className="button button-primary">进入审核台</button>
         </form>
+        <p className="admin-public-link"><a href="/">返回公开首页</a></p>
       </section>
     </main>;
   }
@@ -398,7 +399,10 @@ export function App({ apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "", init
   return <main className="dashboard">
     <header className="dashboard-header">
       <div><p className="eyebrow">Everyday News · 私有审核台</p><h1>今日审核</h1></div>
-      <p>先看这次运行，再处理今天的草稿。</p>
+      <div className="dashboard-header-aside">
+        <p>先看这次运行，再处理今天的草稿。</p>
+        <a href="/">查看公开内容</a>
+      </div>
     </header>
     {error && <p className="app-error" role="alert">{error}</p>}
     <RunStatus run={run} runHistory={runHistory} isStarting={startingRun} onStart={() => void startRun()} onEnableAnonymous={() => void enableAnonymous()} isEnablingAnonymous={enablingAnonymous} collectorEnabled={collectorEnabled} />
