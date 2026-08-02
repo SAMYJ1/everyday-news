@@ -1,6 +1,7 @@
 import type { SourceComment, SourceItem } from "../domain";
 
 export interface RedditSourceAdapter {
+  readonly accessMode?: "rss" | "oauth";
   readonly supportsStateChecks?: boolean;
   listTopPosts(options: { limit: number; time: "day" }): Promise<SourceItem[]>;
   getPostWithComments(

@@ -55,6 +55,7 @@ async function readTextLimited(response: Response): Promise<string> {
 }
 
 export class RssRedditAdapter implements RedditSourceAdapter {
+  readonly accessMode = "rss" as const;
   readonly supportsStateChecks = false;
   private readonly fetcher: Fetcher;
   private readonly userAgent: string;

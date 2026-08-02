@@ -5,6 +5,8 @@ export interface Env {
   ADMIN_KEY: string;
   APP_ORIGIN: string;
   REDDIT_USER_AGENT: string;
+  REDDIT_CLIENT_ID?: string;
+  REDDIT_CLIENT_SECRET?: string;
 }
 
 export type PipelineMessage =

@@ -17,6 +17,7 @@ import {
   RedditTemporaryFailure,
 } from "./reddit/anonymous-json";
 import type { RedditSourceAdapter } from "./reddit/adapter";
+import { AnonymousJsonRedditAdapter } from "./reddit/anonymous-json";
 import { RssRedditAdapter } from "./reddit/rss";
 import type { CardGenerator } from "./ai/workers-ai";
 
@@ -199,13 +200,28 @@ async function refreshRunStatus(
 export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, PipelineMessage> {
   const clock = options.now ?? (() => new Date());
 
-  function pipelineDeps(env: Env, repository: Repository): PipelineDeps {
-    return {
-      repository,
-      reddit: options.reddit ?? new RssRedditAdapter({
+  function redditForEnv(env: Env): RedditSourceAdapter {
+    if (options.reddit !== undefined) return options.reddit;
+    const clientId = env.REDDIT_CLIENT_ID?.trim();
+    const clientSecret = env.REDDIT_CLIENT_SECRET?.trim();
+    if (clientId !== undefined || clientSecret !== undefined) {
+      return new AnonymousJsonRedditAdapter({
         fetcher: fetch,
         userAgent: env.REDDIT_USER_AGENT,
-      }),
+        clientId,
+        clientSecret,
+      });
+    }
+    return new RssRedditAdapter({
+      fetcher: fetch,
+      userAgent: env.REDDIT_USER_AGENT,
+    });
+  }
+
+  function pipelineDeps(repository: Repository, reddit: RedditSourceAdapter): PipelineDeps {
+    return {
+      repository,
+      reddit,
       now: clock,
       onDiscoveryRequestSucceeded: async (at) => {
         await repository.recordAnonymousSuccess(at.toISOString());
@@ -217,8 +233,9 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
     message: Message<PipelineMessage>,
     env: Env,
     repository: Repository,
+    reddit: RedditSourceAdapter,
   ): Promise<void> {
-    const deps = pipelineDeps(env, repository);
+    const deps = pipelineDeps(repository, reddit);
     const current = clock();
 
     function completeStage(): void {
@@ -460,7 +477,8 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
       }
       const accessCode = accessFailureCode(error);
       if (accessCode !== null) {
-        if (message.body.stage === "comments") {
+        const isolateCandidate = message.body.stage === "comments" && deps.reddit.accessMode !== "oauth";
+        if (isolateCandidate) {
           try {
             const candidate = await repository.getCandidate(
               message.body.runId,
@@ -478,12 +496,16 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
         } catch {
           // Breaker persistence is best effort; the run failure is independent.
         }
-        await repository.markRunFailed(
-          message.body.runId,
-          accessCode,
-          errorMessage(error),
-          current.toISOString(),
-        );
+        if (isolateCandidate) {
+          await refreshRunStatus(repository, message.body.runId, current.toISOString());
+        } else {
+          await repository.markRunFailed(
+            message.body.runId,
+            accessCode,
+            errorMessage(error),
+            current.toISOString(),
+          );
+        }
         logPipelineDecision({
           runId: message.body.runId,
           stage: message.body.stage,
@@ -595,9 +617,10 @@ export function createWorker(options: WorkerOptions = {}): ExportedHandler<Env, 
     },
     async queue(batch, env, _ctx) {
       const repository = new Repository(env.DB);
+      const reddit = redditForEnv(env);
       for (const message of batch.messages) {
         try {
-          await processMessage(message, env, repository);
+          await processMessage(message, env, repository, reddit);
         } catch {
           try {
             logPipelineDecision({

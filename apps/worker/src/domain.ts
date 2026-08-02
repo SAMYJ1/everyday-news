@@ -79,9 +79,10 @@ export interface KnowledgeCardRecord {
   titleZh: string;
   oneLineFact: string;
   whyInteresting: string;
-  commentInsights: string[];
+  commentInsights: Array<{ text: string; commentIndex: number }>;
   caveats: string[];
   confidenceNote: string;
+  publicationReason: string;
   model: string;
   promptVersion: string;
   inputHash: string;
@@ -102,11 +103,11 @@ export interface KnowledgeCard extends KnowledgeCardRecord {
 
 export interface PublicKnowledgeCard {
   id: string;
-  status: Extract<SummaryStatus, "draft" | "approved">;
+  status: Extract<SummaryStatus, "approved">;
   titleZh: string;
   oneLineFact: string;
   whyInteresting: string;
-  commentInsights: string[];
+  commentInsights: Array<{ text: string; redditUrl: string | null }>;
   caveats: string[];
   confidenceNote: string;
   generatedAt: string;
@@ -114,6 +115,11 @@ export interface PublicKnowledgeCard {
   redditUrl: string;
   sourceUrl: string | null;
   runLocalDate: string;
+}
+
+export interface PublicFeedPage {
+  cards: PublicKnowledgeCard[];
+  nextCursor: string | null;
 }
 
 export interface AnonymousCollection {

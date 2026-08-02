@@ -39,14 +39,34 @@ const comments: SourceComment[] = [
     fetchedAt: "2026-07-24T00:00:00.000Z",
     deletedAt: null,
     deleted: false
+  },
+  {
+    id: "t1_comment2",
+    itemId: item.id,
+    externalId: "t1_comment2",
+    parentExternalId: item.externalId,
+    author: "another-commenter",
+    body: "A second comment adds another useful detail.",
+    score: 10,
+    depth: 0,
+    redditUrl: "https://reddit.com/r/todayilearned/comments/post1/comment2",
+    publishedAt: "2026-07-24T00:00:00.000Z",
+    fetchedAt: "2026-07-24T00:00:00.000Z",
+    deletedAt: null,
+    deleted: false
   }
 ];
 
 const validCard = {
+  decision: "publish" as const,
+  decisionReason: "内容具体且评论提供了有效信息增量。",
   titleZh: "一条中文标题",
   oneLineFact: "原帖声称这里有一条信息。",
   whyInteresting: "它提供了值得了解的背景。",
-  commentInsights: ["评论补充了一点背景。"],
+  commentInsights: [
+    { text: "评论补充了一点背景。", commentIndex: 0 },
+    { text: "另一条评论提供了细节。", commentIndex: 1 },
+  ],
   caveats: ["评论也提出了保留意见。"],
   confidenceNote: "内容仅基于原帖与评论摘录。"
 };
@@ -71,7 +91,10 @@ describe("KnowledgeCardSchema", () => {
         titleZh: "我",
         oneLineFact: "原帖声称：",
         whyInteresting: "评论补充：",
-        commentInsights: ["评论补充："],
+        commentInsights: [
+          { text: "评论补充：", commentIndex: 0 },
+          { text: "评论观点：", commentIndex: 1 },
+        ],
         caveats: ["评论观点："],
       })
     ).toThrow();

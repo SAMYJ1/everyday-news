@@ -28,8 +28,14 @@ const candidate: Candidate = {
   status: "comments_ready", selectedAt: timestamp
 };
 const card = {
+  decision: "publish" as const, decisionReason: "内容具体且评论提供了信息增量。",
   titleZh: "中文标题", oneLineFact: "原帖声称一件事。", whyInteresting: "值得一读。",
-  commentInsights: ["评论补充。"], caveats: ["存在局限。"], confidenceNote: "仅来自帖子和评论。"
+  commentInsights: [{ text: "评论补充。", commentIndex: 0 }], caveats: ["存在局限。"], confidenceNote: "仅来自帖子和评论。"
+};
+const storedCard = {
+  titleZh: card.titleZh, oneLineFact: card.oneLineFact, whyInteresting: card.whyInteresting,
+  commentInsights: card.commentInsights, caveats: card.caveats, confidenceNote: card.confidenceNote,
+  publicationReason: card.decisionReason,
 };
 
 function deps(existing: KnowledgeCardRecord | null = null): {
@@ -73,7 +79,7 @@ function deps(existing: KnowledgeCardRecord | null = null): {
 }
 
 describe("summarizeCandidate", () => {
-  it("saves a generated card as a draft", async () => {
+  it("saves an AI-approved card as published", async () => {
     const {
       deps: pipelineDeps,
       generate,
@@ -89,8 +95,8 @@ describe("summarizeCandidate", () => {
     expect(generate).toHaveBeenCalledWith({ item, comments: [comment] });
     expect(saveSummaryForClaim).toHaveBeenCalledWith(
       expect.objectContaining({
-        candidateId: candidate.id, status: "draft", ...card, model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-        promptVersion: "v2", inputHash: expect.stringMatching(/^[a-f0-9]{64}$/), generatedAt: timestamp
+        candidateId: candidate.id, status: "approved", ...storedCard, model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        promptVersion: "v3", inputHash: expect.stringMatching(/^[a-f0-9]{64}$/), generatedAt: timestamp
       }),
       claimToken,
     );
@@ -101,10 +107,29 @@ describe("summarizeCandidate", () => {
     );
   });
 
+  it("stores an AI-rejected card outside the public feed", async () => {
+    const { deps: pipelineDeps, generate, saveSummaryForClaim } = deps();
+    generate.mockResolvedValueOnce({
+      ...card,
+      decision: "reject",
+      decisionReason: "内容重复且缺少足够的信息增量。",
+    });
+
+    await summarizeCandidate(pipelineDeps, candidate.runId, item.id);
+
+    expect(saveSummaryForClaim).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "rejected",
+        publicationReason: "内容重复且缺少足够的信息增量。",
+      }),
+      expect.any(String),
+    );
+  });
+
   it("does not call AI or save another card when the input already succeeded", async () => {
     const existing: KnowledgeCardRecord = {
-      id: "summary-1", candidateId: candidate.id, status: "draft", ...card,
-      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", promptVersion: "v2", inputHash: "hash", generatedAt: timestamp
+      id: "summary-1", candidateId: candidate.id, status: "approved", ...storedCard,
+      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", promptVersion: "v3", inputHash: "hash", generatedAt: timestamp
     };
     const { deps: pipelineDeps, generate, saveSummaryForClaim, completeSummaryClaim } =
       deps(existing);
@@ -136,7 +161,7 @@ describe("summarizeCandidate", () => {
     ).mock.calls[0][1] as string;
     expect(saveSummaryForClaim).toHaveBeenCalledWith(
       expect.objectContaining({
-        candidateId: candidate.id, status: "failed", model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", promptVersion: "v2"
+        candidateId: candidate.id, status: "failed", model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", promptVersion: "v3"
       }),
       claimToken,
     );
@@ -149,8 +174,8 @@ describe("summarizeCandidate", () => {
 
   it("does not mark a preserved successful summary as failed", async () => {
     const existing: KnowledgeCardRecord = {
-      id: "summary-1", candidateId: candidate.id, status: "draft", ...card,
-      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", promptVersion: "v2", inputHash: "hash", generatedAt: timestamp
+      id: "summary-1", candidateId: candidate.id, status: "approved", ...storedCard,
+      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", promptVersion: "v3", inputHash: "hash", generatedAt: timestamp
     };
     const { deps: pipelineDeps, saveSummaryForClaim, completeSummaryClaim } = deps();
     pipelineDeps.generator.generate = vi.fn(async () => {

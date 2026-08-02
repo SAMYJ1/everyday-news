@@ -42,17 +42,15 @@ describe("createApiClient", () => {
     );
   });
 
-  it("loads public cards without an authorization header and encodes the date", async () => {
-    const fetchMock = vi.fn(async () => response({ date: "2026-07-24", cards: [] }));
+  it("loads public cards without an authorization header and encodes the cursor", async () => {
+    const fetchMock = vi.fn(async () => response({ cards: [], nextCursor: null }));
     vi.stubGlobal("fetch", fetchMock);
 
     await createPublicApiClient("https://api.example.test/").listCards("2026-07-24 /");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://api.example.test/api/public/cards?date=2026-07-24%20%2F",
-      expect.not.objectContaining({
-        headers: expect.objectContaining({ Authorization: expect.anything() }),
-      }),
+      "https://api.example.test/api/public/cards?limit=20&cursor=2026-07-24%20%2F",
+      {},
     );
   });
 });

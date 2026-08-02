@@ -4,6 +4,7 @@ import type {
   FetchRun,
   KnowledgeCard,
   KnowledgeCardRecord,
+  PublicFeedPage,
   PublicKnowledgeCard,
   SourceComment,
   SourceItem,
@@ -38,6 +39,7 @@ interface SummaryRow {
   comment_insights: string;
   caveats: string;
   confidence_note: string;
+  publication_reason: string;
   model: string;
   prompt_version: string;
   input_hash: string;
@@ -62,11 +64,29 @@ interface PublicSummaryRow {
   comment_insights: string;
   caveats: string;
   confidence_note: string;
+  comment_links: string;
   generated_at: string;
   title_en: string | null;
   reddit_url: string;
   source_url: string | null;
   run_local_date: string;
+}
+
+function parseCommentInsights(value: string): Array<{ text: string; commentIndex: number }> {
+  const parsed: unknown = JSON.parse(value);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.flatMap((insight, index) => {
+    if (typeof insight === "string") return [{ text: insight, commentIndex: index }];
+    if (
+      typeof insight === "object" && insight !== null &&
+      "text" in insight && typeof insight.text === "string" &&
+      "commentIndex" in insight && Number.isInteger(insight.commentIndex) &&
+      Number(insight.commentIndex) >= 0
+    ) {
+      return [{ text: insight.text, commentIndex: Number(insight.commentIndex) }];
+    }
+    return [];
+  });
 }
 
 interface AnonymousCollectionRow {
@@ -125,9 +145,10 @@ function toSummary(row: SummaryRow): KnowledgeCard {
     titleZh: row.title_zh,
     oneLineFact: row.one_line_fact,
     whyInteresting: row.why_interesting,
-    commentInsights: JSON.parse(row.comment_insights) as string[],
+    commentInsights: parseCommentInsights(row.comment_insights),
     caveats: JSON.parse(row.caveats) as string[],
     confidenceNote: row.confidence_note,
+    publicationReason: row.publication_reason,
     model: row.model,
     promptVersion: row.prompt_version,
     inputHash: row.input_hash,
@@ -165,9 +186,10 @@ function toSummaryRecord(row: Omit<SummaryRow, "title_en" | "reddit_url" | "sour
     titleZh: row.title_zh,
     oneLineFact: row.one_line_fact,
     whyInteresting: row.why_interesting,
-    commentInsights: JSON.parse(row.comment_insights) as string[],
+    commentInsights: parseCommentInsights(row.comment_insights),
     caveats: JSON.parse(row.caveats) as string[],
     confidenceNote: row.confidence_note,
+    publicationReason: row.publication_reason,
     model: row.model,
     promptVersion: row.prompt_version,
     inputHash: row.input_hash,
@@ -177,13 +199,17 @@ function toSummaryRecord(row: Omit<SummaryRow, "title_en" | "reddit_url" | "sour
 }
 
 function toPublicSummary(row: PublicSummaryRow): PublicKnowledgeCard {
+  const links = JSON.parse(row.comment_links) as string[];
   return {
     id: row.id,
     status: row.status,
     titleZh: row.title_zh,
     oneLineFact: row.one_line_fact,
     whyInteresting: row.why_interesting,
-    commentInsights: JSON.parse(row.comment_insights) as string[],
+    commentInsights: parseCommentInsights(row.comment_insights).map(({ text, commentIndex }) => ({
+      text,
+      redditUrl: links[commentIndex] ?? null,
+    })),
     caveats: JSON.parse(row.caveats) as string[],
     confidenceNote: row.confidence_note,
     generatedAt: row.generated_at,
@@ -395,20 +421,16 @@ export class Repository {
       }>();
     if (row === null || row.status === "failed" || row.discovery_completed_at === null) return;
 
-    if (row.status === "partial") {
-      await this.db
-        .prepare("UPDATE fetch_runs SET summarized_count = ? WHERE id = ?")
-        .bind(row.summarized, runId)
-        .run();
-      return;
-    }
-
-    const status: FetchRun["status"] =
-      row.failed > 0
-        ? "partial"
-        : row.summarized === row.selected_count
-          ? "completed"
-          : "running";
+    const terminalCount = row.summarized + row.failed;
+    const status: FetchRun["status"] = row.status === "partial"
+      ? "partial"
+      : terminalCount < row.selected_count
+      ? "running"
+      : row.failed === 0
+        ? "completed"
+        : row.summarized === 0
+          ? "failed"
+          : "partial";
     await this.db
       .prepare(
         `UPDATE fetch_runs
@@ -778,10 +800,10 @@ export class Repository {
       .prepare(
         `INSERT INTO summaries (
           id, candidate_id, status, title_zh, one_line_fact, why_interesting,
-          comment_insights, caveats, confidence_note, model, prompt_version,
+          comment_insights, caveats, confidence_note, publication_reason, model, prompt_version,
           input_hash, generated_at, reviewed_at
         )
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         FROM candidates
         JOIN source_items ON source_items.id = candidates.item_id
         WHERE candidates.id = ? AND candidates.status = 'summarizing'
@@ -801,6 +823,7 @@ export class Repository {
           comment_insights = excluded.comment_insights,
           caveats = excluded.caveats,
           confidence_note = excluded.confidence_note,
+          publication_reason = excluded.publication_reason,
           model = excluded.model,
           prompt_version = excluded.prompt_version,
           input_hash = excluded.input_hash,
@@ -821,6 +844,7 @@ export class Repository {
         JSON.stringify(summary.commentInsights),
         JSON.stringify(summary.caveats),
         summary.confidenceNote,
+        summary.publicationReason ?? "",
         summary.model,
         summary.promptVersion,
         summary.inputHash,
@@ -887,7 +911,7 @@ export class Repository {
     const row = await this.db
       .prepare(
         `SELECT id, candidate_id, status, title_zh, one_line_fact, why_interesting,
-          comment_insights, caveats, confidence_note, model, prompt_version, input_hash,
+          comment_insights, caveats, confidence_note, publication_reason, model, prompt_version, input_hash,
           generated_at, reviewed_at
         FROM summaries
         WHERE candidate_id = ? AND prompt_version = ? AND input_hash = ?
@@ -903,10 +927,10 @@ export class Repository {
       .prepare(
         `INSERT INTO summaries (
           id, candidate_id, status, title_zh, one_line_fact, why_interesting,
-          comment_insights, caveats, confidence_note, model, prompt_version,
+          comment_insights, caveats, confidence_note, publication_reason, model, prompt_version,
           input_hash, generated_at, reviewed_at
         )
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         FROM candidates
         JOIN source_items ON source_items.id = candidates.item_id
         WHERE candidates.id = ? AND source_items.deleted_at IS NULL
@@ -924,6 +948,7 @@ export class Repository {
           comment_insights = excluded.comment_insights,
           caveats = excluded.caveats,
           confidence_note = excluded.confidence_note,
+          publication_reason = excluded.publication_reason,
           model = excluded.model,
           prompt_version = excluded.prompt_version,
           input_hash = excluded.input_hash,
@@ -944,6 +969,7 @@ export class Repository {
         JSON.stringify(summary.commentInsights),
         JSON.stringify(summary.caveats),
         summary.confidenceNote,
+        summary.publicationReason ?? "",
         summary.model,
         summary.promptVersion,
         summary.inputHash,
@@ -1069,7 +1095,7 @@ export class Repository {
         JOIN candidates ON candidates.id = summaries.candidate_id
         JOIN source_items ON source_items.id = candidates.item_id
         JOIN fetch_runs ON fetch_runs.id = candidates.run_id
-        WHERE summaries.status IN ('draft', 'approved')
+        WHERE summaries.status = 'approved'
           AND source_items.deleted_at IS NULL
         ORDER BY fetch_runs.local_date DESC`,
       )
@@ -1086,6 +1112,14 @@ export class Repository {
         `SELECT summaries.id, summaries.status, summaries.title_zh,
           summaries.one_line_fact, summaries.why_interesting,
           summaries.comment_insights, summaries.caveats, summaries.confidence_note,
+          COALESCE((
+            SELECT json_group_array(reddit_url) FROM (
+              SELECT reddit_url FROM source_comments
+              WHERE source_comments.item_id = source_items.id
+                AND source_comments.deleted_at IS NULL
+              ORDER BY score DESC, id ASC
+            )
+          ), '[]') AS comment_links,
           summaries.generated_at, source_items.title AS title_en,
           source_items.reddit_url, source_items.source_url,
           fetch_runs.local_date AS run_local_date
@@ -1093,7 +1127,7 @@ export class Repository {
         JOIN candidates ON candidates.id = summaries.candidate_id
         JOIN source_items ON source_items.id = candidates.item_id
         JOIN fetch_runs ON fetch_runs.id = candidates.run_id
-        WHERE summaries.status IN ('draft', 'approved')
+        WHERE summaries.status = 'approved'
           AND source_items.deleted_at IS NULL
           AND fetch_runs.local_date = ?
         ORDER BY summaries.generated_at DESC, summaries.id DESC`,
@@ -1101,6 +1135,56 @@ export class Repository {
       .bind(selectedDate)
       .all<PublicSummaryRow>();
     return result.results.map(toPublicSummary);
+  }
+
+  async listPublicFeed(
+    limit: number,
+    cursor?: { generatedAt: string; id: string },
+  ): Promise<PublicFeedPage> {
+    const cursorCondition = cursor === undefined
+      ? ""
+      : `AND (
+          summaries.generated_at < ? OR
+          (summaries.generated_at = ? AND summaries.id < ?)
+        )`;
+    const statement = this.db.prepare(
+      `SELECT summaries.id, summaries.status, summaries.title_zh,
+        summaries.one_line_fact, summaries.why_interesting,
+        summaries.comment_insights, summaries.caveats, summaries.confidence_note,
+        summaries.generated_at, source_items.title AS title_en,
+        source_items.reddit_url, source_items.source_url,
+        fetch_runs.local_date AS run_local_date,
+        COALESCE((
+          SELECT json_group_array(reddit_url) FROM (
+            SELECT reddit_url FROM source_comments
+            WHERE source_comments.item_id = source_items.id
+              AND source_comments.deleted_at IS NULL
+            ORDER BY score DESC, id ASC
+          )
+        ), '[]') AS comment_links
+      FROM summaries
+      JOIN candidates ON candidates.id = summaries.candidate_id
+      JOIN source_items ON source_items.id = candidates.item_id
+      JOIN fetch_runs ON fetch_runs.id = candidates.run_id
+      WHERE summaries.status = 'approved'
+        AND source_items.deleted_at IS NULL
+        ${cursorCondition}
+      ORDER BY summaries.generated_at DESC, summaries.id DESC
+      LIMIT ?`,
+    );
+    const pageSize = limit + 1;
+    const result = cursor === undefined
+      ? await statement.bind(pageSize).all<PublicSummaryRow>()
+      : await statement.bind(cursor.generatedAt, cursor.generatedAt, cursor.id, pageSize).all<PublicSummaryRow>();
+    const hasMore = result.results.length > limit;
+    const rows = result.results.slice(0, limit);
+    const last = hasMore ? rows.at(-1) : undefined;
+    return {
+      cards: rows.map(toPublicSummary),
+      nextCursor: last === undefined
+        ? null
+        : btoa(JSON.stringify({ generatedAt: last.generated_at, id: last.id })),
+    };
   }
 
   async listCards(status?: SummaryStatus, localDate?: string): Promise<KnowledgeCard[]> {
@@ -1123,7 +1207,8 @@ export class Repository {
     const statement = this.db.prepare(
       `SELECT summaries.id, summaries.candidate_id, summaries.status, summaries.title_zh,
         summaries.one_line_fact, summaries.why_interesting,
-        comment_insights, caveats, confidence_note, model, prompt_version,
+        comment_insights, caveats, confidence_note, summaries.publication_reason,
+        model, prompt_version,
         input_hash, generated_at, reviewed_at, source_items.title AS title_en,
         source_items.reddit_url, source_items.source_url,
         candidates.score AS candidate_score, candidates.reasons AS selection_reasons,
@@ -1163,7 +1248,8 @@ export class Repository {
       .prepare(
         `SELECT summaries.id, summaries.candidate_id, summaries.status, summaries.title_zh,
           summaries.one_line_fact, summaries.why_interesting,
-          comment_insights, caveats, confidence_note, model, prompt_version,
+          comment_insights, caveats, confidence_note, summaries.publication_reason,
+          model, prompt_version,
           input_hash, generated_at, reviewed_at, source_items.title AS title_en,
           source_items.reddit_url, source_items.source_url,
           candidates.score AS candidate_score, candidates.reasons AS selection_reasons,

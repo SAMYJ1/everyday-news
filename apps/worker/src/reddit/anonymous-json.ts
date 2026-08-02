@@ -45,9 +45,12 @@ export class RedditTemporaryFailure extends Error {
 interface AnonymousJsonOptions {
   fetcher: Fetcher;
   userAgent: string;
+  clientId?: string;
+  clientSecret?: string;
 }
 
 const ORIGIN = "https://www.reddit.com";
+const OAUTH_ORIGIN = "https://oauth.reddit.com";
 // A Reddit Listing slice defaults to 25. Keep each lookup at that documented
 // size and set the limit explicitly so omission remains a deletion signal.
 const LOOKUP_CHUNK_SIZE = 25;
@@ -137,15 +140,27 @@ function wait(seconds: number): Promise<void> {
 }
 
 export class AnonymousJsonRedditAdapter implements RedditSourceAdapter {
+  readonly accessMode: "rss" | "oauth";
   private readonly fetcher: Fetcher;
   private readonly userAgent: string;
+  private readonly clientId?: string;
+  private readonly clientSecret?: string;
+  private readonly origin: string;
+  private accessToken: { value: string; expiresAt: number } | null = null;
 
-  constructor({ fetcher, userAgent }: AnonymousJsonOptions) {
+  constructor({ fetcher, userAgent, clientId, clientSecret }: AnonymousJsonOptions) {
     if (!userAgent.trim()) {
       throw new TypeError("REDDIT_USER_AGENT must be configured");
     }
+    if ((clientId === undefined) !== (clientSecret === undefined)) {
+      throw new TypeError("REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET must be configured together");
+    }
     this.fetcher = fetcher;
     this.userAgent = userAgent;
+    this.clientId = clientId;
+    this.clientSecret = clientSecret;
+    this.accessMode = clientId === undefined ? "rss" : "oauth";
+    this.origin = this.accessMode === "oauth" ? OAUTH_ORIGIN : ORIGIN;
   }
 
   async listTopPosts(options: { limit: number; time: "day" }) {
@@ -222,6 +237,10 @@ export class AnonymousJsonRedditAdapter implements RedditSourceAdapter {
 
   private async requestJson(url: URL): Promise<unknown> {
     let response = await this.fetch(url);
+    if (response.status === 401 && this.accessMode === "oauth") {
+      this.accessToken = null;
+      response = await this.fetch(url);
+    }
     if (response.status === 429) {
       const delay = retryAfterSeconds(response.headers.get("Retry-After"));
       await wait(delay);
@@ -265,15 +284,17 @@ export class AnonymousJsonRedditAdapter implements RedditSourceAdapter {
   }
 
   private async fetch(url: URL): Promise<Response> {
-    if (url.origin !== ORIGIN) {
-      throw new TypeError("Anonymous Reddit adapter only permits www.reddit.com");
+    if (url.origin !== this.origin) {
+      throw new TypeError("Reddit adapter request origin did not match its configured access mode");
     }
     try {
+      const authorization = await this.authorizationHeader();
       return await this.fetcher(
         new Request(url, {
           headers: {
             Accept: "application/json",
             "User-Agent": this.userAgent,
+            ...(authorization === null ? {} : { Authorization: authorization }),
           },
           redirect: "manual",
         }),
@@ -285,8 +306,51 @@ export class AnonymousJsonRedditAdapter implements RedditSourceAdapter {
     }
   }
 
+  private async authorizationHeader(): Promise<string | null> {
+    if (this.clientId === undefined || this.clientSecret === undefined) return null;
+    if (this.accessToken !== null && this.accessToken.expiresAt > Date.now() + 60_000) {
+      return `Bearer ${this.accessToken.value}`;
+    }
+    const response = await this.fetcher(new Request("https://www.reddit.com/api/v1/access_token", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Basic ${btoa(`${this.clientId}:${this.clientSecret}`)}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": this.userAgent,
+      },
+      body: "grant_type=client_credentials",
+      redirect: "manual",
+    }));
+    if (response.status === 401 || response.status === 403) {
+      throw new RedditAccessDenied(response.status);
+    }
+    if (response.status === 429) {
+      throw new RedditRateLimited(retryAfterSeconds(response.headers.get("Retry-After")));
+    }
+    if (response.status >= 500) {
+      throw new RedditTemporaryFailure(`Reddit OAuth token failure (${response.status})`, response.status);
+    }
+    if (!response.ok) {
+      throw new RedditUnexpectedResponse(`Unexpected Reddit OAuth token status ${response.status}`);
+    }
+    const payload: unknown = await response.json();
+    if (
+      typeof payload !== "object" || payload === null ||
+      !("access_token" in payload) || typeof payload.access_token !== "string" ||
+      !("expires_in" in payload) || typeof payload.expires_in !== "number"
+    ) {
+      throw new RedditUnexpectedResponse("Invalid Reddit OAuth token response");
+    }
+    this.accessToken = {
+      value: payload.access_token,
+      expiresAt: Date.now() + Math.max(0, payload.expires_in) * 1_000,
+    };
+    return `Bearer ${this.accessToken.value}`;
+  }
+
   private url(path: string, query: Record<string, string | number>): URL {
-    const url = new URL(path, ORIGIN);
+    const url = new URL(path, this.origin);
     for (const [key, value] of Object.entries(query)) {
       url.searchParams.set(key, String(value));
     }

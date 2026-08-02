@@ -21,12 +21,16 @@ function promptFor({ item, comments }: CardInput, repair = false): string {
 
   return [
     "请根据以下 Reddit 原帖与评论摘录，生成简洁的中文知识卡片 JSON。",
+    "你同时是发布编辑：decision 只能是 publish 或 reject，decisionReason 必须具体说明决定理由。",
+    "仅当内容具体、有信息增量、不是明显误导或低质量重复时选择 publish；不确定时选择 reject。",
     "只能将帖子内容表述为“原帖声称”，只能将评论内容表述为“评论补充”或评论观点。",
     "不得声称已进行外部事实核查，也不得把外部链接内容当作已验证事实。",
     "titleZh 必须是 4 至 30 个汉字左右的具体标题，不能使用“我”等占位词。",
     "oneLineFact 必须用完整中文句子概括原帖主张，并以“原帖声称”开头。",
     "whyInteresting 必须具体说明这条知识为什么值得读，不能只写字段标签。",
-    "commentInsights 与 caveats 的每一项都必须是有实际信息的完整中文句子。",
+    "commentInsights 必须有 2 至 3 项，每项包含完整中文观点 text，以及对应评论摘录的零基 commentIndex。",
+    "commentIndex 必须真实对应支撑该观点的评论，不能超出评论摘录范围，也不能重复。",
+    "caveats 的每一项都必须是有实际信息的完整中文句子。",
     "confidenceNote 必须明确说明内容只基于原帖与评论、尚未完成外部核验。",
     "英文原标题和链接是只读元数据：保持原样，不要翻译、改写或臆造。",
     `英文原标题（只读元数据）：${item.title ?? "（无标题）"}`,
@@ -130,9 +134,13 @@ export class WorkersAiCardGenerator implements CardGenerator {
         const card = KnowledgeCardSchema.parse(
           normalizeCardCandidate(responseValue(output)),
         );
-        if (input.comments.length > 0 && card.commentInsights.length === 0) {
+        const indexes = card.commentInsights.map(({ commentIndex }) => commentIndex);
+        if (
+          indexes.some((index) => index >= input.comments.length) ||
+          new Set(indexes).size !== indexes.length
+        ) {
           throw new InvalidCardResponse(
-            "Workers AI omitted comment insights despite available comments",
+            "Workers AI returned invalid comment insight references",
           );
         }
         return card;

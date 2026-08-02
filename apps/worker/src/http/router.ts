@@ -1,10 +1,9 @@
 import { Repository } from "../db/repository";
-import type { Env, PipelineMessage } from "../env";
+import type { Env } from "../env";
 import type { SummaryStatus } from "../domain";
 import { isAuthorized } from "./auth";
 
 const JSON_CONTENT_TYPE = "application/json";
-const DELIVERY_CLAIM_LEASE_MS = 60_000;
 const LISTABLE_CARD_STATUSES = new Set<SummaryStatus>(["draft", "approved", "rejected"]);
 
 export interface RouterDeps {
@@ -66,6 +65,28 @@ function isValidLocalDate(value: string): boolean {
     date.getUTCDate() === Number(day);
 }
 
+function publicFeedLimit(value: string | null): number | null {
+  if (value === null) return 20;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 50 ? parsed : null;
+}
+
+function publicFeedCursor(value: string | null): { generatedAt: string; id: string } | null | undefined {
+  if (value === null) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(atob(value));
+    if (
+      typeof parsed !== "object" || parsed === null ||
+      !("generatedAt" in parsed) || typeof parsed.generatedAt !== "string" ||
+      Number.isNaN(Date.parse(parsed.generatedAt)) ||
+      !("id" in parsed) || typeof parsed.id !== "string" || parsed.id.length === 0
+    ) return null;
+    return { generatedAt: parsed.generatedAt, id: parsed.id };
+  } catch {
+    return null;
+  }
+}
+
 export async function routeRequest(request: Request, deps: RouterDeps): Promise<Response> {
   const { env, repository } = deps;
   const url = new URL(request.url);
@@ -89,16 +110,12 @@ export async function routeRequest(request: Request, deps: RouterDeps): Promise<
   }
 
   if (request.method === "GET" && url.pathname === "/api/public/cards") {
-    const requestedDate = url.searchParams.get("date");
-    if (requestedDate !== null && !isValidLocalDate(requestedDate)) {
-      return error(request, env, 400, "invalid_date", "Date must be a valid YYYY-MM-DD");
-    }
+    const limit = publicFeedLimit(url.searchParams.get("limit"));
+    if (limit === null) return error(request, env, 400, "invalid_limit", "Limit must be an integer from 1 to 50");
+    const cursor = publicFeedCursor(url.searchParams.get("cursor"));
+    if (cursor === null) return error(request, env, 400, "invalid_cursor", "Cursor is invalid");
     try {
-      const date = requestedDate ?? (await repository.listPublicDates())[0] ?? null;
-      return json(request, env, {
-        date,
-        cards: date === null ? [] : await repository.listPublicCards(date),
-      });
+      return json(request, env, await repository.listPublicFeed(limit, cursor));
     } catch {
       return error(request, env, 500, "internal_error", "Internal server error");
     }
@@ -152,48 +169,6 @@ export async function routeRequest(request: Request, deps: RouterDeps): Promise<
       return card === null
         ? error(request, env, 404, "not_found", "Card not found")
         : json(request, env, { card });
-    }
-
-    for (const action of ["approve", "reject"] as const) {
-      const id = cardId(url.pathname, action);
-      if (request.method === "POST" && id !== null) {
-        const card = await repository.getCard(id);
-        if (card === null) return error(request, env, 404, "not_found", "Card not found");
-        await repository.recordReview(id, action, deps.now.toISOString());
-        return json(request, env, { card: await repository.getCard(id) });
-      }
-    }
-
-    const regenerateId = cardId(url.pathname, "regenerate");
-    if (request.method === "POST" && regenerateId !== null) {
-      const card = await repository.getCard(regenerateId);
-      if (card === null) return error(request, env, 404, "not_found", "Card not found");
-      const at = deps.now.toISOString();
-      const regeneration = await repository.createOrGetCardRegeneration(regenerateId, at);
-      if (regeneration !== null) {
-        const token = crypto.randomUUID();
-        const claimed = await repository.claimCardRegenerationDelivery(
-          regeneration.id,
-          token,
-          at,
-          new Date(deps.now.getTime() - DELIVERY_CLAIM_LEASE_MS).toISOString(),
-        );
-        if (claimed) {
-          try {
-            await env.PIPELINE.send({
-              stage: "summarize",
-              runId: regeneration.runId,
-              itemId: regeneration.itemId,
-              regeneration: { id: regeneration.id, nonce: regeneration.nonce },
-            } satisfies PipelineMessage);
-            await repository.markCardRegenerationEnqueued(regeneration.id, token, at);
-          } catch (error) {
-            await repository.releaseCardRegenerationDelivery(regeneration.id, token);
-            throw error;
-          }
-        }
-      }
-      return json(request, env, { card: await repository.getCard(regenerateId) }, 202);
     }
 
     if (request.method === "POST" && url.pathname === "/api/runs") {

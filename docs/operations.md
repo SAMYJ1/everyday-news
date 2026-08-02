@@ -25,7 +25,8 @@ secrets:
 - `PAGES_BASE_URL`: the production Pages origin, with no path or trailing
   slash.
 
-`ADMIN_KEY`, `REDDIT_USER_AGENT`, and `APP_ORIGIN` remain Cloudflare Worker
+`ADMIN_KEY`, `REDDIT_USER_AGENT`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`,
+and `APP_ORIGIN` remain Cloudflare Worker
 runtime secrets. Do not add them to the Web build or expose them as `VITE_*`
 variables.
 
@@ -135,17 +136,26 @@ Wrangler displays the pending migrations and asks for confirmation. Review the
 names before confirming. It captures a backup and rolls back a migration that
 fails; make later schema corrections in a new forward migration.
 
-Set the two owner-provided secrets interactively. Wrangler reads each value
+Set the owner-provided secrets interactively. Wrangler reads each value
 from the terminal; do not pipe it from shell history:
 
 ```sh
 npx wrangler secret put ADMIN_KEY --config apps/worker/wrangler.jsonc
 npx wrangler secret put REDDIT_USER_AGENT --config apps/worker/wrangler.jsonc
+npx wrangler secret put REDDIT_CLIENT_ID --config apps/worker/wrangler.jsonc
+npx wrangler secret put REDDIT_CLIENT_SECRET --config apps/worker/wrangler.jsonc
 ```
 
 `ADMIN_KEY` must be a new high-entropy value used only for this service.
 `REDDIT_USER_AGENT` must be the owner-approved descriptive user agent. Neither
 has a repository default.
+
+The Reddit client ID and secret must belong to the explicitly approved Data API
+application for this service. Configure both or neither. With both configured,
+the Worker uses `client_credentials` and only calls `oauth.reddit.com`; an OAuth
+failure is surfaced and is never silently downgraded to RSS. Without them, the
+Worker keeps the existing low-frequency RSS path as a best-effort fallback and
+cannot guarantee three to five daily cards.
 
 Deploy the Worker only after the real D1 UUID is present:
 

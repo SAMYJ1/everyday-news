@@ -60,7 +60,7 @@ export function RunStatus({ run, runHistory, isStarting, onStart, onEnableAnonym
           </div>)}
         </dl>
         <div className={collectorPaused ? "collector-status collector-status-paused" : "collector-status"}>
-          <span>匿名采集：{collectorPaused ? "已暂停" : "正常或待下一次检查"}</span>
+          <span>Reddit 采集：{collectorPaused ? "已暂停" : "正常或待下一次检查"}</span>
           {collectorPaused && <button type="button" className="text-button" onClick={onEnableAnonymous} disabled={isEnablingAnonymous}>
             {isEnablingAnonymous ? "正在恢复…" : "重新启用"}
           </button>}

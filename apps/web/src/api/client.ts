@@ -47,11 +47,11 @@ export interface AnonymousCollection {
 
 export interface PublicKnowledgeCard {
   id: string;
-  status: "draft" | "approved";
+  status: "approved";
   titleZh: string;
   oneLineFact: string;
   whyInteresting: string;
-  commentInsights: string[];
+  commentInsights: Array<{ text: string; redditUrl: string | null }>;
   caveats: string[];
   confidenceNote: string;
   generatedAt: string;
@@ -138,14 +138,12 @@ export function createPublicApiClient(baseUrl: string) {
   }
 
   return {
-    listDates: async (init?: RequestInit) => (
-      await request<{ dates: string[] }>("/api/public/dates", init)
-    ).dates,
-    listCards: async (date: string, init?: RequestInit) => (
-      await request<{ date: string | null; cards: PublicKnowledgeCard[] }>(
-        `/api/public/cards?date=${encodeURIComponent(date)}`,
+    listCards: async (cursor?: string, init?: RequestInit) => {
+      const cursorQuery = cursor === undefined ? "" : `&cursor=${encodeURIComponent(cursor)}`;
+      return request<{ cards: PublicKnowledgeCard[]; nextCursor: string | null }>(
+        `/api/public/cards?limit=20${cursorQuery}`,
         init,
-      )
-    ),
+      );
+    },
   };
 }

@@ -8,7 +8,7 @@ describe("RouteApp", () => {
   beforeEach(() => {
     sessionStorage.clear();
     vi.stubGlobal("fetch", vi.fn(async () => new Response(
-      JSON.stringify({ dates: [] }),
+      JSON.stringify({ cards: [], nextCursor: null }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     )));
   });
@@ -25,7 +25,7 @@ describe("RouteApp", () => {
 
   it("renders the private dashboard at the admin route", () => {
     render(<RouteApp pathname="/admin" />);
-    expect(screen.getByRole("heading", { name: "今天，挑出值得留下的知识。" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "采集运行状态" })).toBeInTheDocument();
   });
 
   it("renders a not-found view for unknown routes", () => {

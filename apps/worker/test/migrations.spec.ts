@@ -41,7 +41,7 @@ describe("run-attempt migration", () => {
           comment_insights, caveats, confidence_note, model, prompt_version,
           input_hash, generated_at, reviewed_at
         ) VALUES (
-          'summary-1', 'candidate-1', 'approved', '标题', '事实', '有趣',
+          'summary-1', 'candidate-1', 'draft', '标题', '事实', '有趣',
           '[]', '[]', '高', 'model', 'v1', 'hash',
           '2026-07-23T00:03:00.000Z', '2026-07-23T00:04:00.000Z'
         )`,
@@ -87,6 +87,18 @@ describe("run-attempt migration", () => {
 
     const foreignKeyErrors = await env.DB.prepare("PRAGMA foreign_key_check").all();
     expect(foreignKeyErrors.results).toEqual([]);
+  });
+
+  it("migrates legacy public drafts to automatic publication without deleting review history", async () => {
+    const summary = await env.DB.prepare(
+      "SELECT status, publication_reason, reviewed_at FROM summaries WHERE id = 'summary-1'",
+    ).first<{ status: string; publication_reason: string; reviewed_at: string | null }>();
+    expect(summary).toEqual({
+      status: "approved",
+      publication_reason: "Legacy public card migrated to automatic publishing",
+      reviewed_at: "2026-07-23T00:04:00.000Z",
+    });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM review_actions").first()).toEqual({ count: 1 });
   });
 
   it("allows terminal history but only one active attempt per local date", async () => {

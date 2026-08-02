@@ -3,6 +3,7 @@ import initialMigration from "../migrations/0001_initial.sql?raw";
 import deliveryClaimsMigration from "../migrations/0002_delivery_claims.sql?raw";
 import anonymousFailureDaysMigration from "../migrations/0003_anonymous_failure_days.sql?raw";
 import runAttemptsMigration from "../migrations/0004_run_attempts.sql?raw";
+import aiPublishingMigration from "../migrations/0005_ai_publishing.sql?raw";
 
 function migrationQueries(sql: string): string[] {
   const triggerPattern = /CREATE TRIGGER[\s\S]*?END;/g;
@@ -31,6 +32,10 @@ export const migrations = [
     {
       name: "0004_run_attempts.sql",
       queries: migrationQueries(runAttemptsMigration)
+    },
+    {
+      name: "0005_ai_publishing.sql",
+      queries: migrationQueries(aiPublishingMigration)
     }
   ];
 

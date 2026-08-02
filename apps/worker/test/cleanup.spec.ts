@@ -554,7 +554,7 @@ describe("source cleanup", () => {
       status: "failed",
     });
     expect(await repository.getRunByLocalDate("2026-07-25")).toMatchObject({
-      status: "partial",
+      status: "failed",
     });
     expect(await repository.listCards()).toEqual([]);
   });
@@ -619,7 +619,7 @@ describe("source cleanup", () => {
     });
     expect(await repository.getActiveCardRegeneration(`run-1:${item.id}`)).toBeNull();
     expect(await repository.getRunByLocalDate("2026-07-25")).toMatchObject({
-      status: "partial",
+      status: "failed",
     });
     expect(await repository.listCards()).toEqual([]);
   });
@@ -951,10 +951,12 @@ describe("anonymous access circuit breaker", () => {
       checkComments: vi.fn(async () => []),
     };
     const generate = vi.fn(async () => ({
+      decision: "publish" as const,
+      decisionReason: "内容具体且评论提供了信息增量。",
       titleZh: "可继续完成",
       oneLineFact: "已有输入不需要再次访问 Reddit。",
       whyInteresting: "避免丢弃已经安全收集的工作。",
-      commentInsights: ["评论已存储。"],
+      commentInsights: [{ text: "评论已存储。", commentIndex: 0 }],
       caveats: ["来源采集当前暂停。"],
       confidenceNote: "仅使用已保存输入。",
     }));
@@ -977,7 +979,7 @@ describe("anonymous access circuit breaker", () => {
     expect(reddit.checkItems).not.toHaveBeenCalled();
     expect(reddit.checkComments).not.toHaveBeenCalled();
     expect(message.ack).toHaveBeenCalledOnce();
-    expect(await repository.listCards("draft")).toHaveLength(1);
+    expect(await repository.listCards("approved")).toHaveLength(1);
   });
 
   it("persists the terminal run failure even when breaker persistence fails", async () => {

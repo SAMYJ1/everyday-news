@@ -30,7 +30,6 @@ export function PublicCard({ card }: PublicCardProps) {
     <header>
       <p className="eyebrow">{card.runLocalDate}</p>
       <h2>{card.titleZh}</h2>
-      {card.titleEn && <p className="public-card-english">{card.titleEn}</p>}
     </header>
     <p className="public-card-fact">{card.oneLineFact}</p>
     <section>
@@ -38,21 +37,22 @@ export function PublicCard({ card }: PublicCardProps) {
       <p>{card.whyInteresting}</p>
     </section>
     {card.commentInsights.length > 0 && <section>
-      <h3>评论里的补充</h3>
+      <h3>精选评论</h3>
       <ul>
-        {card.commentInsights.map((insight) => <li key={insight}>{insight}</li>)}
+        {card.commentInsights.map((insight, index) => <li key={`${insight.text}-${index}`}>
+          {insight.text}{" "}
+          <SourceLink href={insight.redditUrl} unavailable="对应评论不可用">查看评论</SourceLink>
+        </li>)}
       </ul>
     </section>}
-    {card.caveats.length > 0 && <section className="public-card-caveats">
-      <h3>阅读提示</h3>
-      <ul>
-        {card.caveats.map((caveat) => <li key={caveat}>{caveat}</li>)}
-      </ul>
-    </section>}
-    <p className="public-card-confidence">{card.confidenceNote}</p>
-    <footer className="public-card-links">
-      <SourceLink href={card.redditUrl} unavailable="Reddit 原帖不可用">Reddit 原帖</SourceLink>
-      <SourceLink href={card.sourceUrl} unavailable="外部来源不可用">外部来源</SourceLink>
+    <footer className="public-card-meta">
+      {card.titleEn && <p className="public-card-english">{card.titleEn}</p>}
+      {card.caveats.length > 0 && <p>{card.caveats.join(" · ")}</p>}
+      <p>{card.confidenceNote}</p>
+      <div className="public-card-links">
+        <SourceLink href={card.redditUrl} unavailable="Reddit 原帖不可用">Reddit 原帖</SourceLink>
+        <SourceLink href={card.sourceUrl} unavailable="外部来源不可用">外部来源</SourceLink>
+      </div>
     </footer>
   </article>;
 }

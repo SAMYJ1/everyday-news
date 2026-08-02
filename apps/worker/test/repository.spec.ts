@@ -402,7 +402,6 @@ describe("Repository", () => {
     expect(await repository.listPublicDates()).toEqual(["2026-07-24", "2026-07-23"]);
     expect((await repository.listPublicCards()).map(({ id }) => id)).toEqual([
       "approved-card",
-      "draft-card",
     ]);
     expect((await repository.listPublicCards("2026-07-23")).map(({ id }) => id)).toEqual([
       "old-approved",
@@ -553,7 +552,10 @@ describe("Repository", () => {
     expect(await repository.getCandidate("run-1", "item-1")).toEqual(candidate());
     expect(await repository.getSourceItem("item-1")).toMatchObject(sourceItem());
     expect(await repository.listComments("item-1")).toMatchObject([{ id: "comment-1", body: "A useful comment." }]);
-    expect(await repository.getSuccessfulSummary("candidate-1", "v1", "sha256:test")).toMatchObject(summary());
+    expect(await repository.getSuccessfulSummary("candidate-1", "v1", "sha256:test")).toMatchObject({
+      ...summary(),
+      commentInsights: [{ text: "评论补充", commentIndex: 0 }],
+    });
     expect(await repository.getSuccessfulSummary("candidate-1", "v1", "sha256:failed")).toBeNull();
   });
 

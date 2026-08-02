@@ -6,7 +6,7 @@ import {
 } from "../ai/workers-ai";
 import type { PipelineDeps } from "./discover";
 
-export const PROMPT_VERSION = "v2";
+export const PROMPT_VERSION = "v3";
 export const SUMMARY_CLAIM_LEASE_MS = 10 * 60 * 1_000;
 
 export class SummaryClaimUnavailable extends Error {
@@ -140,6 +140,7 @@ export async function summarizeCandidate(
         commentInsights: [],
         caveats: [],
         confidenceNote: "",
+        publicationReason: "AI response failed schema validation",
       }, claimToken);
       if (!saved) {
         await terminalizeRejectedSummary(
@@ -174,8 +175,14 @@ export async function summarizeCandidate(
   }
 
   try {
+    const { decision, decisionReason, ...content } = card;
     const saved = await deps.repository.saveSummaryForClaim(
-      { ...base, ...card, status: "draft" },
+      {
+        ...base,
+        ...content,
+        status: decision === "publish" ? "approved" : "rejected",
+        publicationReason: decisionReason,
+      },
       claimToken,
     );
     if (!saved) {

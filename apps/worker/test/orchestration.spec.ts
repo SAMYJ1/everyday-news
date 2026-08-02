@@ -67,10 +67,12 @@ function candidate(runId: string, itemId: string, status: Candidate["status"] = 
 
 function knowledgeCard() {
   return {
+    decision: "publish" as const,
+    decisionReason: "内容具体且评论提供了信息增量。",
     titleZh: "中文标题",
     oneLineFact: "原帖声称一件值得了解的事。",
     whyInteresting: "这件事提供了一个有趣的视角。",
-    commentInsights: ["评论补充了背景。"],
+    commentInsights: [{ text: "评论补充了背景。", commentIndex: 0 }],
     caveats: ["尚未进行外部事实核查。"],
     confidenceNote: "内容仅基于原帖和评论。",
   };
@@ -113,7 +115,7 @@ function reddit(overrides: Partial<{
 }
 
 function environment(pipeline: ReturnType<typeof queue>) {
-  return { ...env, PIPELINE: pipeline };
+  return { ...env, PIPELINE: pipeline, REDDIT_USER_AGENT: "everyday-news-test" };
 }
 
 describe("pipeline orchestration", () => {
@@ -330,8 +332,8 @@ describe("pipeline orchestration", () => {
       {} as ExecutionContext,
     );
     expect(await repository.getRunByLocalDate("2026-07-24")).toMatchObject({
-      status: "failed",
-      errorCode: "forbidden",
+      status: "queued",
+      errorCode: null,
     });
 
     pipeline.send.mockClear();
@@ -410,7 +412,7 @@ describe("pipeline orchestration", () => {
 
   it.each([
     ["summarized", "completed"],
-    ["failed", "partial"],
+    ["failed", "failed"],
   ] as const)("refreshes a run from a replayed %s summary message", async (candidateStatus, runStatus) => {
     const pipeline = queue();
     const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
@@ -673,7 +675,7 @@ describe("pipeline orchestration", () => {
     });
   });
 
-  it("stops sibling comment stages after one marks the run failed", async () => {
+  it("continues sibling comment stages after one RSS candidate is denied", async () => {
     const pipeline = queue();
     const { run } = await repository.createOrGetRun({ localDate: "2026-07-24", startedAt: now.toISOString() });
     await repository.upsertSourceItem(item("t3_denied"));
@@ -701,12 +703,16 @@ describe("pipeline orchestration", () => {
       {} as ExecutionContext,
     );
 
-    expect(redditAdapter.getPostWithComments).toHaveBeenCalledOnce();
+    expect(redditAdapter.getPostWithComments).toHaveBeenCalledTimes(2);
     expect(denied.ack).toHaveBeenCalledOnce();
     expect(sibling.ack).toHaveBeenCalledOnce();
-    expect(pipeline.send).not.toHaveBeenCalled();
+    expect(pipeline.send).toHaveBeenCalledWith({
+      stage: "summarize",
+      runId: run.id,
+      itemId: "t3_sibling",
+    });
     expect(await repository.getCandidate(run.id, "t3_denied")).toMatchObject({ status: "failed" });
-    expect(await repository.getCandidate(run.id, "t3_sibling")).toMatchObject({ status: "failed" });
+    expect(await repository.getCandidate(run.id, "t3_sibling")).toMatchObject({ status: "comments_ready" });
   });
 
   it.each([
