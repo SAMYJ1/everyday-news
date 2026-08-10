@@ -63,14 +63,19 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 .public-app { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: clamp(38px, 8vw, 88px) 0 32px; }
 .public-hero { max-width: 760px; margin-bottom: clamp(28px, 6vw, 52px); }
 .public-hero > p:not(.eyebrow) { max-width: 640px; color: #536b61; font-size: 1.05rem; line-height: 1.7; }
-.public-feed { display: grid; gap: 18px; width: min(100%, 780px); }
-.public-card { padding: clamp(24px, 4vw, 34px); border: 1px solid #d7ddd6; border-radius: 18px; background: #fffefa; box-shadow: 0 10px 30px #20312a0a; }
-.public-card h2 { font-size: clamp(1.55rem, 3vw, 2.15rem); line-height: 1.2; }
+.public-feed { display: grid; gap: 14px; width: min(100%, 780px); }
+.public-card { padding: clamp(20px, 3vw, 28px); border: 1px solid #d7ddd6; border-radius: 18px; background: #fffefa; box-shadow: 0 8px 24px #20312a08; }
+.public-card h2 { font-size: clamp(1.4rem, 3vw, 1.85rem); line-height: 1.25; }
 .public-card h3 { margin-bottom: 7px; color: #294c40; }
 .public-card p, .public-card li { line-height: 1.65; }
-.public-card section { margin-top: 24px; }
+.public-card section { margin-top: 22px; }
 .public-card-english { margin: 9px 0 0; color: #6a7d74; font-style: italic; }
-.public-card-fact { margin: 24px 0 0; color: #173f33; font-size: 1.15rem; font-weight: 700; }
+.public-card-fact { margin: 17px 0 0; color: #29473d; font-size: 1.03rem; font-weight: 650; }
+.public-card-toggle { display: inline-flex; align-items: center; gap: 5px; margin: 14px 0 0; padding: 6px 4px; border: 0; border-radius: 7px; background: transparent; color: #075d4b; font-weight: 750; transition: color 160ms ease, transform 120ms cubic-bezier(.23, 1, .32, 1); }
+.public-card-toggle svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; transition: transform 160ms cubic-bezier(.23, 1, .32, 1); }
+.public-card-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.public-card-toggle:active { transform: scale(.97); }
+.public-card-details { border-top: 1px solid #e4e8e2; margin-top: 10px; }
 .public-card-meta { margin-top: 24px; padding-top: 16px; border-top: 1px solid #dfe4de; color: #687a72; font-size: .86rem; }
 .public-card-meta p { margin-bottom: 8px; line-height: 1.5; }
 .public-card-links { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 24px; color: #687a72; font-size: .9rem; }
@@ -81,4 +86,6 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 .public-footer p { margin: 0; }
 .not-found { display: grid; min-height: 100vh; place-items: center; padding: 24px; }
 .not-found section { max-width: 520px; text-align: center; }
+@media (hover: hover) and (pointer: fine) { .public-card-toggle:hover { color: #043f33; } }
+@media (prefers-reduced-motion: reduce) { .public-card-toggle, .public-card-toggle svg { transition-duration: 0ms; } }
 @media (max-width: 640px) { .dashboard { width: min(100% - 24px, 1180px); padding-top: 26px; } .dashboard-header, .section-heading { align-items: stretch; flex-direction: column; } .dashboard-header-aside { max-width: none; text-align: left; } .run-metrics { gap: 7px; } .run-metrics div { padding: 10px; } .public-app { width: min(100% - 24px, 1120px); padding-top: 28px; } .public-footer { align-items: flex-start; flex-direction: column; } }

@@ -35,8 +35,16 @@ describe("PublicApp", () => {
 
     const article = await screen.findByRole("article", { name: publicCard.titleZh });
     expect(screen.queryByLabelText("选择日期")).not.toBeInTheDocument();
+    expect(within(article).getByText(publicCard.oneLineFact)).toBeInTheDocument();
+    expect(within(article).queryByRole("heading", { name: "值得一看" })).not.toBeInTheDocument();
+    const expandButton = within(article).getByRole("button", { name: "展开阅读" });
+    expect(expandButton).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(expandButton);
+    expect(within(article).getByRole("heading", { name: "值得一看" })).toBeInTheDocument();
     expect(within(article).getByRole("heading", { name: "精选评论" })).toBeInTheDocument();
     expect(within(article).getByRole("link", { name: "查看评论" })).toHaveAttribute("href", "https://reddit.example.test/comment");
+    expect(within(article).getByRole("button", { name: "收起内容" })).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(screen.getByRole("button", { name: "加载更早内容" }));
     expect(await screen.findByRole("article", { name: older.titleZh })).toBeInTheDocument();
   });
@@ -58,6 +66,7 @@ describe("PublicApp", () => {
     })));
     render(<PublicApp apiBaseUrl="https://api.example.test" />);
     const article = await screen.findByRole("article", { name: publicCard.titleZh });
+    fireEvent.click(within(article).getByRole("button", { name: "展开阅读" }));
     expect(within(article).getByText("对应评论不可用")).toBeInTheDocument();
     expect(within(article).getByText("Reddit 原帖不可用")).toBeInTheDocument();
     expect(within(article).getByText("外部来源不可用")).toBeInTheDocument();
